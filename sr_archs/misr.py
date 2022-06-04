@@ -233,3 +233,26 @@ class RAMs(tf.keras.models.Model):
 
     def call(self, inputs, training=None, mask=None):
         return self.forward(inputs)
+
+
+class RAMsGAN(RAMs):
+    def __init__(self,
+                 n_filters: int,
+                 r: int,
+                 scale: int,
+                 n: int,
+                 t: int
+                 ):
+        super(RAMsGAN, self).__init__(n_filters, r, scale, n, t)
+
+    def compile(self, learning_rate, ):
+        super(RAMsGAN, self).compile()
+        g_step = tf.Variable(0, trainable=False)
+        g_scheduler = tf.optimizers.schedules.PiecewiseConstantDecay()
+        g_optimizer = tfa.optimizers.AdamW(
+
+        )
+        c_optimizer = tfa.optimizers.AdamW(
+
+        )
+

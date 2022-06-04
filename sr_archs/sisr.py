@@ -124,7 +124,7 @@ class NAFNetSR(nn.Module):
     n_filters: int
     n_blocks: int
     stochastic_depth_rate: float
-    train_size: List = None, 36, 36, 1
+    train_size: List = None, 48, 48, 1
     tlsc_rate: float = 1.5
 
     @nn.compact

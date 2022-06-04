@@ -1,4 +1,5 @@
 import tensorflow as tf
+import tensorflow_addons as tfa
 from einops import rearrange
 import jax
 import jax.numpy as jnp
@@ -24,22 +25,6 @@ def tf_compute_gen_loss(fake_logit):
     return loss
 
 
-def flax_compute_critic_loss(true_logit, fake_logit):
-    loss = jnp.mean(
-        fake_logit
-    ) - tf.reduce_mean(
-        true_logit
-    )
-    return loss
-
-
-def flax_compute_gen_loss(fake_logit):
-    loss = -jnp.mean(
-        fake_logit
-    )
-    return loss
-
-
 class DownsamplingConv2D(tf.keras.layers.Layer):
     def __init__(
             self,
@@ -51,14 +36,15 @@ class DownsamplingConv2D(tf.keras.layers.Layer):
         super(DownsamplingConv2D, self).__init__()
 
         self.forward = tf.keras.Sequential([
-            tf.keras.layers.LayerNormalization(),
             tf.keras.layers.Conv2D(filters=n_filters,
                                    kernel_size=(kernel_size, kernel_size),
                                    strides=(strides, strides),
                                    padding=padding,
                                    activation='linear',
-                                   kernel_initializer=tf.keras.initializers.random_normal(stddev=0.02)
+                                   kernel_initializer=tf.keras.initializers.random_normal(stddev=0.02),
+                                   use_bias=False
                                    ),
+            tfa.layers.InstanceNormalization(),
             tf.keras.layers.LeakyReLU(.2)
         ])
 
@@ -66,9 +52,9 @@ class DownsamplingConv2D(tf.keras.layers.Layer):
         return self.forward(inputs)
 
 
-class Critic(tf.keras.layers.Layer):
+class TFCritic(tf.keras.layers.Layer):
     def __init__(self, dims: int = 32):
-        super(Critic, self).__init__()
+        super(TFCritic, self).__init__()
         self.dims = dims
 
         self.forward = tf.keras.Sequential([
