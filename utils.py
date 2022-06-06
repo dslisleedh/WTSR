@@ -106,42 +106,25 @@ def get_patches(rng, img, crop_size):
 
 
 @jax.jit
-def apply_model(model, state, lr, hr, rng):
-    model.is_training = True
-
+def update_model(state, lr, hr, rng):
     def loss_fn(params):
-        recon = model.apply({'params': params}, lr, rngs={'dropout': rng, 'droppath': rng})
-        loss = jnp.mean(abs(hr - recon))
+        recon = state.apply_fn({'params': params}, lr, training=True, rngs={'dropout': rng, 'droppath': rng})
+        loss = jnp.mean(jnp.abs(hr - recon))
         return loss
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     loss, grads = grad_fn(state.params)
-    return loss, grads
 
-def flax_compute_critic_loss(true_logit, fake_logit):
-    loss = jnp.mean(
-        fake_logit
-    ) - tf.reduce_mean(
-        true_logit
-    )
-    return loss
+    new_state = state.apply_gradients(grads=grads)
+    return loss, grads, new_state
 
-
-def flax_compute_gen_loss(fake_logit):
-    loss = -jnp.mean(
-        fake_logit
-    )
-    return loss
 
 @jax.jit
-def apply_critic(model, state, critic, critic_state, lr, hr, rng):
-    model.is_training = True
-    critic.is_training = True
-
+def update_critic(state, critic_state, lr, hr, rng):
     def loss_fn(params, critic_params):
-        recon = model.apply({'params': params}, lr, rngs={'dropout': rng, 'droppath': rng})
-        true_logit = critic.apply({'params': critic_params}, hr)
-        fake_logit = critic.apply({'params': critic_params}, recon)
+        recon = state.apply_fn({'params': params}, lr, rngs={'dropout': rng, 'droppath': rng})
+        true_logit = critic_state.apply_fn({'params': critic_params}, hr)
+        fake_logit = critic_state.apply_fn({'params': critic_params}, recon)
         loss = jnp.mean(
             fake_logit
         ) - jnp.mean(
@@ -151,17 +134,17 @@ def apply_critic(model, state, critic, critic_state, lr, hr, rng):
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     loss, grads = grad_fn(state.params, critic_state.params)
-    return loss, grads
+
+    new_critic_state = critic_state.apply_gradients(grads=grads)
+    return loss, grads, new_critic_state
 
 
 @jax.jit
-def apply_generator(model, state, critic, critic_state, lr, rng):
-    model.is_training = True
-    critic.is_training = True
+def apply_generator(state, critic_state, lr, rng):
 
     def loss_fn(params, critic_params):
-        recon = model.apply({'params': params}, lr, rngs={'dropout': rng, 'droppath': rng})
-        fake_logit = critic.apply({'params': critic_params}, recon)
+        recon = state.apply_fn({'params': params}, lr, training=True, rngs={'dropout': rng, 'droppath': rng})
+        fake_logit = critic_state.apply_fn({'params': critic_params}, recon)
         loss = -jnp.mean(
             fake_logit
         )
@@ -173,14 +156,8 @@ def apply_generator(model, state, critic, critic_state, lr, rng):
 
 
 @jax.jit
-def update_model(state, grads):
-    return state.apply_gradients(grads=grads)
-
-
-@jax.jit
-def evaluate_model(model, state, lr, hr, max_val):
-    model.is_training = False
-    recon = model.apply({'params': state.params}, lr)
+def evaluate_model(state, lr, hr, max_val):
+    recon = state.apply_fn({'params': state.params}, lr)
     psnr, ssim = compute_metrics(recon, hr, max_val)
     return psnr, ssim
 

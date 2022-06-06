@@ -126,9 +126,11 @@ class NAFNetSR(nn.Module):
     stochastic_depth_rate: float
     train_size: List = None, 48, 48, 1
     tlsc_rate: float = 1.5
+    training: Optional[bool] = None
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, training: Optional[bool] = None):
+        training = nn.merge_param('deterministic', self.training, training)
         B, H, W, C = x.shape
         kh, kw = int(self.train_size[1] * self.tlsc_rate), int(self.train_size[2] * self.tlsc_rate)
 
@@ -139,7 +141,7 @@ class NAFNetSR(nn.Module):
                            )
         for _ in range(self.n_blocks):
             features_res = NAFBlock(self.n_filters, kh, kw)(features)
-            features_res = DropPath(1. - self.stochastic_depth_rate)(features_res)
+            features_res = DropPath(1. - self.stochastic_depth_rate)(features_res, deterministic=not training)
             features = features + features_res
         features = nn.Conv(self.upscale_rate ** 2)
         recon = PixelShuffle(features)
