@@ -17,6 +17,7 @@ from jax import lax
 import os
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from model_funcs import *
 
 
 def load_datasets(model: str):
@@ -31,62 +32,6 @@ def load_datasets(model: str):
     else:
         raise NotImplementedError("Model selection error. ['sisr', 'misr']")
     return train, valid, test
-
-
-def create_nafnet_train_state(rng, n_steps, args_parsed):
-    if args_parsed.usegan:
-        rng, critic_rng = jax.random.split(rng, 2)
-
-    model = sisr.NAFNetSR(
-        args_parsed.scale,
-        args_parsed.n_filters,
-        args_parsed.n_blocks,
-        args_parsed.stochastic_depth_rate
-    )
-    assert 48//args_parsed.scale == 1
-    params = model.init(rng, jnp.ones([1, 48//args_parsed.scale, 48//args_parsed.scale, 1]))['params']
-    scheduler = optax.cosine_onecycle_schedule(
-        10 * n_steps,
-        args_parsed.learning_rate,
-        final_div_factor=3e4
-    )
-    tx = optax.adamw(
-        learning_rate=scheduler,
-        weight_decay=args_parsed.weight_decay,
-        b1=.9,
-        b2=.9
-    )
-    if args_parsed.usegan:
-        critic = ganmodule.FlaxCritic()
-        critic_params = model.init(critic_rng, jnp.ones([1, 48, 48, 1]))['params']
-        critic_scheduler = optax.cosine_onecycle_schedule(
-            50 * n_steps,
-            args_parsed.learning_rate,
-            final_div_factor=3e4
-        )
-        critic_tx = optax.adamw(
-            learning_rate=critic_scheduler,
-            weight_decay=args_parsed.weight_decay,
-            b1=.5,
-            b2=.9
-        )
-        return [
-            model,
-            train_state.TrainState.create(
-                apply_fn=model.apply, params=params, tx=tx
-            ),
-            critic,
-            train_state.TrainState.create(
-                apply_fn=critic.apply, params=critic_params, tx=critic_tx
-            )
-        ]
-
-    return [
-        model,
-        train_state.TrainState.create(
-            apply_fn=model.apply, params=params, tx=tx
-        )
-    ]
 
 
 def get_patch(img, h_start, w_start, crop_size):
@@ -105,63 +50,6 @@ def get_patches(rng, img, crop_size):
     return jax.jit(jax.vmap(get_patch, in_axes=(0, 0, 0, None)), static_argnums=3)(img, h_starts, w_starts, crop_size)
 
 
-@jax.jit
-def update_model(state, lr, hr, rng):
-    def loss_fn(params):
-        recon = state.apply_fn({'params': params}, lr, training=True, rngs={'dropout': rng, 'droppath': rng})
-        loss = jnp.mean(jnp.abs(hr - recon))
-        return loss
-
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    loss, grads = grad_fn(state.params)
-
-    new_state = state.apply_gradients(grads=grads)
-    return loss, grads, new_state
-
-
-@jax.jit
-def update_critic(state, critic_state, lr, hr, rng):
-    def loss_fn(params, critic_params):
-        recon = state.apply_fn({'params': params}, lr, rngs={'dropout': rng, 'droppath': rng})
-        true_logit = critic_state.apply_fn({'params': critic_params}, hr)
-        fake_logit = critic_state.apply_fn({'params': critic_params}, recon)
-        loss = jnp.mean(
-            fake_logit
-        ) - jnp.mean(
-            true_logit
-        )
-        return loss
-
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    loss, grads = grad_fn(state.params, critic_state.params)
-
-    new_critic_state = critic_state.apply_gradients(grads=grads)
-    return loss, grads, new_critic_state
-
-
-@jax.jit
-def apply_generator(state, critic_state, lr, rng):
-
-    def loss_fn(params, critic_params):
-        recon = state.apply_fn({'params': params}, lr, training=True, rngs={'dropout': rng, 'droppath': rng})
-        fake_logit = critic_state.apply_fn({'params': critic_params}, recon)
-        loss = -jnp.mean(
-            fake_logit
-        )
-        return loss
-
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    loss, grads = grad_fn(state.params, critic_state.params)
-    return loss, grads
-
-
-@jax.jit
-def evaluate_model(state, lr, hr, max_val):
-    recon = state.apply_fn({'params': state.params}, lr)
-    psnr, ssim = compute_metrics(recon, hr, max_val)
-    return psnr, ssim
-
-
 def compute_metrics(recon, hr, max_val):
     if isinstance(recon, jnp.ndarray):
         recon = tf.convert_to_tensor(recon)
@@ -169,3 +57,40 @@ def compute_metrics(recon, hr, max_val):
     psnr = tf.image.psnr(recon, hr, max_val=max_val)
     ssim = tf.image.ssim(recon, hr, max_val=max_val)
     return psnr, ssim
+
+
+@jax.jit
+def normalize(
+        x,
+        x_min=None,
+        x_max=None
+):
+    if not x_min and not x_max:
+        x_min = x.min(axis=0)
+        x_max = x.max(axis=0)
+
+    x_scaled = (x - x_min) / (x_max - x_min)
+    return x_scaled, x_min, x_max
+
+
+@jax.jit
+def inverse_normalize(
+        x,
+        x_min,
+        x_max
+):
+    x_inversed = x * (x_max-x_min) + x_min
+    return x_inversed
+
+
+@jax.jit
+def downsample_bicubic(
+        x,
+        scale
+):
+    b, h, w, c = x.shape
+    return jax.image.resize(
+        x,
+        (b, h//scale, w//scale, c),
+        method='bicubic'
+    )

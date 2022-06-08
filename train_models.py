@@ -5,7 +5,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from flax.training import train_state
+from flax.training import train_state, checkpoints
 from typing import Optional, List
 import optax
 import time
@@ -18,78 +18,102 @@ import os
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from utils import *
+from model_funcs import *
+from absl import logging
+from flax.metrics import tensorboard
+import time
+import ml_collections
+from flax import serialization
+import pickle
 
 
-parser = argparse.ArgumentParser(description='Hyperparameters to train network')
-
-parser.add_argument('--random_state', type=int, default=42, help='random_state')
-
-parser.add_argument('--epochs', type=int, default=100, help='number of epochs')
-parser.add_argument('--batch_size', type=int, default=128, help='size of minibatch')
-parser.add_argument('--learning_rate', type=float, default=3e-3, help='size of steps to optimize')
-parser.add_argument('--weigh_decay', type=float, default=0., help='google AdamW')
-parser.add_argument('--early_stopping', type=int, default=10, help='patient')
-
-parser.add_argument('--n_filters', type=int, default=32, help='number of filters in network')
-parser.add_argument('--scale', type=int, default=10, help='upscale rate')
-parser.add_argument('--n_blocks', type=int, default=12, help='number of blocks(naf, rfab)')
-parser.add_argument('--usegan', type=bool, default=False, help='whether to use gan discriminator')
-parser.add_argument('--sr_archs', type=str, default='sisr', help='select sr_archs to train')
-# NAFNet
-parser.add_argument('--stochstic_depth_rate', type=float, default=.1, help='google Droppath/Stochastic_depth')
-# RAMS
-parser.add_argument('--time', type=int, default=5, help='number of lags')
-
-
-def train_models(args_parsed):
-    if args_parsed.sr_archs == 'sisr':
-        train_nafnet(parser)
-    elif args_parsed.sr_archs == 'misr':
-        train_rams(parser)
+def train_models(config):
+    if config.sr_archs == 'sisr':
+        train_sisr(config)
+    elif config.sr_archs == 'misr':
+        train_rams(config)
     else:
         raise NotImplementedError("Model selection error. ['sisr', 'misr']")
 
 
-def train_nafnet(args_parsed):
-    train, valid, test = load_datasets(args_parsed.sr_archs)
-    n_steps = train//args_parsed.batch_size
+def train_sisr(config):
+    train_time = time.localtime(time.time())
+    work_path = f'./logs/{config.sr_archs}_{train_time[0]}_{train_time[1]}_{train_time[2]}_{train_time[3]}'
+    os.makedirs(work_path)
+    summary_writer = tensorboard.SummaryWriter(work_path)
+    summary_writer.hparams(dict(config))
 
-    rng = jax.random.PRNGKey(args_parsed.random_state)
+    train, valid, test = load_datasets(config.sr_archs)
+    train, train_min, train_max = normalize(train)
+    valid = normalize(valid, train_min, train_max)[0]
+    valid_lr = downsample_bicubic(valid, config.scale)
+    test = normalize(test, train_min, train_max)[0]
+    test_lr = downsample_bicubic(test, config.scale)
 
+    n_steps = train.shape[0] // config.batch_size
+    rng = jax.random.PRNGKey(config.random_state)
 
+    early_stopping_loss = jnp.inf
+    patient = 1
 
-
-def nafnet_epochs(
-        model,
-        model_state,
-        rng,
-        train_ds,
-        batch_size,
-        scale
-):
-    s, h, w, c = train_ds.shape
-    steps_per_epoch = s // batch_size
-
-    perms = jax.random.permutation(rng, s)
-    perms = perms[:steps_per_epoch * batch_size]
-    perms = perms.reshape((steps_per_epoch, batch_size))
-
-    for perm in perms:
-        rng = jax.random.split(rng, 2)[0]
-        batch_labels = train_ds[perm, ...]
-        batch_lr = jax.image.resize(
-            get_patches(rng, batch_labels, 48),
-            (batch_size, 48 // scale, 48 // scale, c),
-            method='bicubic'
+    if config.usegan:
+        model_state, critic_state = create_nafnet_train_state(
+            rng, n_steps, config
         )
+    else:
+        model_state = create_nafnet_train_state(
+            rng, n_steps, config
+        )
+
+    for epoch in range(1, config.epochs+1):
+        if config.usegan:
+            model_state, critic_state, epoch_gan_loss, epoch_gen_loss = nafnet_gan_train_epochs(
+                model_state, critic_state, rng, train, config.batch_size,
+                config.scale, config.alpha, config.beta
+            )
+            logging.info(
+                f'Epoch {epoch}, training gan_loss: {epoch_gan_loss}, training gen_loss: {epoch_gen_loss}'
+            )
+            summary_writer.scalar('gan_loss', epoch_gan_loss, epoch)
+            summary_writer.scalar('gen_loss', epoch_gen_loss, epoch)
+        else:
+            model_state, epoch_loss = nafnet_train_epochs(
+                model_state, rng, train,
+                config.batch_size, config.scale
+            )
+            logging.info(
+                f'Epoch {epoch}, training recon loss: {epoch_loss}'
+            )
+            summary_writer.scalar('recon_loss', epoch_loss, epoch)
+
+        loss, psnr, ssim = evaluate_model(model_state, valid_lr, valid, 1.)
+        logging.info(
+            f'Epoch {epoch}, Valid loss : {loss}, Valid psnr: {psnr}, Valid ssim: {ssim}'
+        )
+
+        summary_writer.scalar('valid_loss', loss, epoch)
+        summary_writer.scalar('valid_psnr', psnr, epoch)
+        summary_writer.scalar('valid_ssim', ssim, epoch)
+
+        if early_stopping_loss > loss:
+            patient = 1
+            early_stopping_loss = copy.deepcopy(loss)
+        else:
+            patient += 1
+            if config.early_stopping < patient:
+                print(' ##### Early Stopped training ##### ')
+                break
+
+    loss, psnr, ssim = evaluate_model(model_state, test_lr, test, 1.)
+    summary_writer.scalar('test_loss', loss, 1)
+    summary_writer.scalar('test_loss', psnr, 1)
+    summary_writer.scalar('test_loss', ssim, 1)
 
 
 
 
 
 ###########################################################
-
-
 
 
 def train_rams(args):
@@ -100,4 +124,28 @@ def train_rams(args):
 
 
 if __name__ == "__main__":
-    train_models(parser)
+    parser = argparse.ArgumentParser(description='Hyperparameters to train network')
+
+    parser.add_argument('--random_state', type=int, default=42, help='random_state')
+
+    parser.add_argument('--epochs', type=int, default=100, help='number of epochs')
+    parser.add_argument('--batch_size', type=int, default=128, help='size of minibatch')
+    parser.add_argument('--learning_rate', type=float, default=3e-3, help='size of steps to optimize')
+    parser.add_argument('--weigh_decay', type=float, default=0., help='google AdamW')
+    parser.add_argument('--early_stopping', type=int, default=10, help='patient')
+
+    parser.add_argument('--n_filters', type=int, default=32, help='number of filters in network')
+    parser.add_argument('--scale', type=int, default=10, help='upscale rate')
+    parser.add_argument('--n_blocks', type=int, default=12, help='number of blocks(naf, rfab)')
+    parser.add_argument('--usegan', type=bool, default=False, help='whether to use gan discriminator')
+    parser.add_argument('--sr_archs', type=str, default='sisr', help='select sr_archs to train')
+    parser.add_argument('--alpha', type=float, default=1., )
+    # NAFNet
+    parser.add_argument('--stochstic_depth_rate', type=float, default=.1, help='google Droppath/Stochastic_depth')
+    # RAMS
+    parser.add_argument('--time', type=int, default=5, help='number of lags')
+
+    cfg_dict = vars(parser)
+    cfg = ml_collections.config_dict.ConfigDict(cfg_dict)
+
+    train_models(cfg)

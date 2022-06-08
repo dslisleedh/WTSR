@@ -77,7 +77,7 @@ class FlaxCritic(nn.Module):
         x = nn.Conv(self.n_filters // 2,
                     kernel_size=(5, 5),
                     padding='SAME'
-                    )
+                    )(x)
         x = jax.nn.leaky_relu(x, negative_slope=.2)
         for i in range(4):
             x = nn.LayerNorm()(x)
@@ -89,5 +89,5 @@ class FlaxCritic(nn.Module):
         x = nn.Conv(1,
                     kernel_size=(3, 3),
                     padding='VALID'
-                    )
+                    )(x)
         return x
