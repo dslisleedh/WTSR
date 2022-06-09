@@ -2,17 +2,19 @@ from netCDF4 import Dataset as NetCDFFile
 import numpy as np
 from tqdm import tqdm
 import os
+import natsort
 
 
 def get_data_from_cdf(
         is_make_timeseries: bool = True,
         t: int = 5,
         val_rate: float = .2,
-        test_rate: float = .15,
+        test_rate: float = .2,
         data_path: str = './data/raw/',
-        save_path: str = './data/raw/'
+        save_path: str = './data/preprocessed/'
 ):
     filenames = os.listdir(data_path)
+    filenames = natsort.natsorted(filenames, reverse=True)
     print('loading files ...')
     print(f'files found: {len(filenames)}')
     data = []
@@ -22,10 +24,12 @@ def get_data_from_cdf(
         data.append(np.array(mnc.variables['analysed_sst'][:])[:, :100, :100] - 273.15)
         mnc.close()
     data = np.concatenate(data, axis=0)
+
     num_instances = len(data)
-    test = data[-int(num_instances * test_rate):, :, :]
-    valid = data[-int(num_instances * (test_rate + val_rate)):-int(num_instances * test_rate), :, :]
-    train = data[:-int(num_instances * (test_rate + val_rate)), :, :]
+    test = np.expand_dims(data[-int(num_instances * test_rate):, :, :], axis=-1)
+    valid = np.expand_dims(data[-int(num_instances * (test_rate + val_rate)):-int(num_instances * test_rate), :, :],
+                           axis=-1)
+    train = np.expand_dims(data[:-int(num_instances * (test_rate + val_rate)), :, :], axis=-1)
 
     np.save(save_path + 'train.npy', train)
     np.save(save_path + 'valid.npy', valid)
@@ -41,9 +45,8 @@ def get_data_from_cdf(
         np.save(save_path + 'ts_test.npy', test)
 
 
-def make_timeseries(data, t):
-    data = np.expand_dims(data, axis=-1)
-    time_list = [data[i:, -(t - i)] for i in range(t)]
+def make_timeseries(inputs, t):
+    time_list = [inputs[i: -(t - i), :, :, :] for i in range(t)]
     return np.concatenate(time_list, axis=-1)
 
 

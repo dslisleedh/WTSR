@@ -17,7 +17,9 @@ from jax import lax
 import os
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from utils import *
+from utils import (
+    downsample_bicubic, compute_metrics, get_patches
+)
 
 
 def create_nafnet_train_state(rng, n_steps, config):
@@ -30,8 +32,10 @@ def create_nafnet_train_state(rng, n_steps, config):
         config.n_blocks,
         config.stochastic_depth_rate
     )
-    assert 48//config.scale == 1
-    params = model.init(rng, jnp.ones([1, 48//config.scale, 48//config.scale, 1]))['params']
+    assert 48 % config.scale == 0
+    rng1, rng2 = jax.random.split(rng, 2)
+    params = model.init({'params': rng1, 'droppath': rng2},
+                        jnp.ones([1, 48//config.scale, 48//config.scale, 1]))['params']
     scheduler = optax.cosine_onecycle_schedule(
         10 * n_steps,
         config.learning_rate,
@@ -45,7 +49,8 @@ def create_nafnet_train_state(rng, n_steps, config):
     )
     if config.usegan:
         critic = ganmodule.FlaxCritic()
-        critic_params = model.init(critic_rng, jnp.ones([1, 48, 48, 1]))['params']
+        critic_rng1, critic_rng2 = jax.random.split(critic_rng, 2)
+        critic_params = critic.init({'params': critic_rng1, 'droppath': critic_rng2}, jnp.ones([1, 48, 48, 1]))['params']
         critic_scheduler = optax.cosine_onecycle_schedule(
             50 * n_steps,
             config.learning_rate,
@@ -74,14 +79,14 @@ def create_nafnet_train_state(rng, n_steps, config):
 @jax.jit
 def update_model(state, lr, hr, rng):
     def loss_fn(params):
-        recon = state.apply_fn({'params': params}, lr, training=True, rngs={'dropout': rng, 'droppath': rng})
+        recon = state.apply_fn({'params': params}, lr, deterministic=False, rngs={'dropout': rng, 'droppath': rng})
         # compute L1 loss
         loss = jnp.mean(
             jnp.abs(hr - recon)
         )
         return loss
 
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    grad_fn = jax.value_and_grad(loss_fn)
     loss, grads = grad_fn(state.params)
 
     new_state = state.apply_gradients(grads=grads)
@@ -92,18 +97,17 @@ def update_model(state, lr, hr, rng):
 def update_critic(state, critic_state, lr, hr, rng, lambda_weights=10.):
     rng1, rng2 = jax.random.split(rng, 2)
 
-    def loss_fn(params, critic_params):
-        recon = state.apply_fn({'params': params}, lr, rngs={'dropout': rng1, 'droppath': rng1})
-
+    def loss_fn(critic_params):
+        recon = state.apply_fn({'params': state.params}, lr, deterministic=False, rngs={'dropout': rng1, 'droppath': rng1})
         true_logit = critic_state.apply_fn({'params': critic_params}, hr)
         fake_logit = critic_state.apply_fn({'params': critic_params}, recon)
 
         # compute gradient penalty
         epsilon = jax.random.uniform(rng2, shape=(hr.shape[0], 1, 1, 1), minval=0., maxval=1.)
-        x_hat = epsilon * hr + (1 - epsilon) * recon
-        gp_grads = jax.vmap(jax.grad(lambda x: state.apply_fn({'params': critic_params}, x)))(x_hat)
+        x_hat = epsilon * hr + (1. - epsilon) * recon
+        gp_grads = jax.vmap(jax.grad(lambda x: critic_state.apply_fn({'params': critic_params}, x)))(x_hat)
         gp_l2norm = jnp.sqrt(jnp.sum(jnp.square(gp_grads), axis=(1, 2, 3)))
-        gp = jnp.mean(jnp.square(gp_l2norm - 1))
+        gp = jnp.mean(jnp.square(gp_l2norm - 1.))
 
         # compute Wasserstein loss and add gradient penalty * lambda
         loss = jnp.mean(
@@ -115,8 +119,8 @@ def update_critic(state, critic_state, lr, hr, rng, lambda_weights=10.):
         )
         return loss
 
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    loss, grads = grad_fn(state.params, critic_state.params)
+    grad_fn = jax.value_and_grad(loss_fn)
+    loss, grads = grad_fn(critic_state.params)
 
     new_critic_state = critic_state.apply_gradients(grads=grads)
     return loss, new_critic_state, rng1
@@ -125,7 +129,7 @@ def update_critic(state, critic_state, lr, hr, rng, lambda_weights=10.):
 @jax.jit
 def apply_generator(state, critic_state, lr, hr, rng, alpha, beta):
     def loss_fn(params, critic_params):
-        recon = state.apply_fn({'params': params}, lr, training=True, rngs={'dropout': rng, 'droppath': rng})
+        recon = state.apply_fn({'params': params}, lr, deterministic=False, rngs={'dropout': rng, 'droppath': rng})
         fake_logit = critic_state.apply_fn({'params': critic_params}, recon)
         # L1 Loss
         recon_loss = jnp.mean(
@@ -137,18 +141,20 @@ def apply_generator(state, critic_state, lr, hr, rng, alpha, beta):
         )
         return alpha * recon_loss + beta * gen_loss
 
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    grad_fn = jax.value_and_grad(loss_fn)
     loss, grads = grad_fn(state.params, critic_state.params)
 
     new_gen_state = state.apply_gradients(grads=grads)
     return loss, new_gen_state
 
 
-@jax.jit
-def evaluate_model(state, lr, hr, max_val):
-    recon = state.apply_fn({'params': state.params}, lr)
+def evaluate_model(state, lr, hr, max_val, rng):
+    recon = state.apply_fn({'params': state.params}, lr, rngs={'droppath': rng})
+    loss = jnp.mean(
+        jnp.abs(recon - hr)
+    )
     psnr, ssim = compute_metrics(recon, hr, max_val)
-    return psnr, ssim
+    return loss, psnr, ssim
 
 
 def nafnet_train_epochs(

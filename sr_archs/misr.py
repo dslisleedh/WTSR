@@ -1,5 +1,6 @@
 import tensorflow as tf
 import tensorflow_addons as tfa
+from typing import List
 
 
 class PixelShuffle(tf.keras.layers.Layer):
@@ -220,6 +221,28 @@ class RAMs(tf.keras.models.Model):
         ])
 
     @tf.function
+    def train_step(self, hr):
+        patches_hr = tf.image.random_crop(hr, 48)
+        b, h, w, c = patches_hr.shape
+        patches_lr = tf.image.resize(
+            patches_hr,
+            (h // self.scale, w // self.scale),
+            method=tf.image.ResizeMethod.BICUBIC
+        )
+
+        with tf.GradientTape() as tape:
+            recon = self.forward(patches_lr)
+            loss = tf.reduce_mean(
+                tf.abs(recon - patches_hr)
+            )
+        grads = tape.gradient(loss, self.trainable_variables)
+        self.optimizer.apply_gradients(
+            zip(grads, self.trainable_variables)
+        )
+
+        return {'recon_loss': loss}
+
+    @tf.function
     def forward(self, x):
         skip = tf.expand_dims(tf.gather(x, -1, axis=-1), axis=-1)
         _, H, W, _ = tf.shape(skip)
@@ -236,14 +259,8 @@ class RAMs(tf.keras.models.Model):
 
 
 class RAMsGAN(RAMs):
-    def __init__(self,
-                 n_filters: int,
-                 r: int,
-                 scale: int,
-                 n: int,
-                 t: int
-                 ):
-        super(RAMsGAN, self).__init__(n_filters, r, scale, n, t)
+    def __init__(self, **kwargs):
+        super(RAMsGAN, self).__init__(**kwargs)
 
     def compile(self, learning_rate, ):
         super(RAMsGAN, self).compile()
@@ -255,4 +272,20 @@ class RAMsGAN(RAMs):
         c_optimizer = tfa.optimizers.AdamW(
 
         )
+
+    @tf.function
+    def train_step(self, hr):
+        patches_hr = tf.image.random_crop(hr, 48)
+        b, h, w, t = patches_hr.shape
+        patches_lr = tf.image.resize(
+            patches_hr,
+            (h // self.scale, w // self.scale),
+            method=tf.image.ResizeMethod.BICUBIC
+        )
+
+        with tf.GradientTape() as tape:
+            recon = self.forward(patches_lr)
+
+
+
 

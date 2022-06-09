@@ -17,7 +17,7 @@ from jax import lax
 import os
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from model_funcs import *
+from functools import partial
 
 
 def load_datasets(model: str):
@@ -54,18 +54,17 @@ def compute_metrics(recon, hr, max_val):
     if isinstance(recon, jnp.ndarray):
         recon = tf.convert_to_tensor(recon)
         hr = tf.convert_to_tensor(hr)
-    psnr = tf.image.psnr(recon, hr, max_val=max_val)
-    ssim = tf.image.ssim(recon, hr, max_val=max_val)
+    psnr = tf.reduce_mean(tf.image.psnr(recon, hr, max_val=max_val))
+    ssim = tf.reduce_mean(tf.image.ssim(recon, hr, max_val=max_val))
     return psnr, ssim
 
 
-@jax.jit
 def normalize(
         x,
         x_min=None,
         x_max=None
 ):
-    if not x_min and not x_max:
+    if x_min is None:
         x_min = x.min(axis=0)
         x_max = x.max(axis=0)
 
@@ -73,7 +72,6 @@ def normalize(
     return x_scaled, x_min, x_max
 
 
-@jax.jit
 def inverse_normalize(
         x,
         x_min,
@@ -83,7 +81,6 @@ def inverse_normalize(
     return x_inversed
 
 
-@jax.jit
 def downsample_bicubic(
         x,
         scale

@@ -83,6 +83,7 @@ class FlaxCritic(nn.Module):
             x = nn.LayerNorm()(x)
             x = nn.Conv(self.n_filters * (2 ** i),
                         kernel_size=(3, 3),
+                        strides=(2, 2),
                         padding='SAME'
                         )(x)
             x = jax.nn.leaky_relu(x, negative_slope=.2)
@@ -90,4 +91,5 @@ class FlaxCritic(nn.Module):
                     kernel_size=(3, 3),
                     padding='VALID'
                     )(x)
+        x = jnp.squeeze(x)
         return x

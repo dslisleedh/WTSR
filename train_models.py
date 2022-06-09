@@ -19,7 +19,6 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from utils import *
 from model_funcs import *
-from absl import logging
 from flax.metrics import tensorboard
 import time
 import ml_collections
@@ -38,8 +37,8 @@ def train_models(config):
 
 def train_sisr(config):
     train_time = time.localtime(time.time())
-    work_path = f'./logs/{config.sr_archs}_{train_time[0]}_{train_time[1]}_{train_time[2]}_{train_time[3]}'
-    os.makedirs(work_path)
+    work_path = f'./logs/{config.sr_archs}_{train_time[0]}_{train_time[1]}_{train_time[2]}_{train_time[3]}_{train_time[4]}'
+    os.mkdir(work_path)
     summary_writer = tensorboard.SummaryWriter(work_path)
     summary_writer.hparams(dict(config))
 
@@ -71,7 +70,7 @@ def train_sisr(config):
                 model_state, critic_state, rng, train, config.batch_size,
                 config.scale, config.alpha, config.beta
             )
-            logging.info(
+            print(
                 f'Epoch {epoch}, training gan_loss: {epoch_gan_loss}, training gen_loss: {epoch_gen_loss}'
             )
             summary_writer.scalar('gan_loss', epoch_gan_loss, epoch)
@@ -81,13 +80,14 @@ def train_sisr(config):
                 model_state, rng, train,
                 config.batch_size, config.scale
             )
-            logging.info(
+            print(
                 f'Epoch {epoch}, training recon loss: {epoch_loss}'
             )
             summary_writer.scalar('recon_loss', epoch_loss, epoch)
 
-        loss, psnr, ssim = evaluate_model(model_state, valid_lr, valid, 1.)
-        logging.info(
+        rng = jax.random.split(rng, 2)[0]
+        loss, psnr, ssim = evaluate_model(model_state, valid_lr, valid, 1., rng)
+        print(
             f'Epoch {epoch}, Valid loss : {loss}, Valid psnr: {psnr}, Valid ssim: {ssim}'
         )
 
@@ -104,13 +104,13 @@ def train_sisr(config):
                 print(' ##### Early Stopped training ##### ')
                 break
 
-    loss, psnr, ssim = evaluate_model(model_state, test_lr, test, 1.)
+    rng = jax.random.split(rng, 2)[0]
+    loss, psnr, ssim = evaluate_model(model_state, test_lr, test, 1., rng)
     summary_writer.scalar('test_loss', loss, 1)
     summary_writer.scalar('test_loss', psnr, 1)
     summary_writer.scalar('test_loss', ssim, 1)
 
-
-
+    checkpoints.save_checkpoint(ckpt_dir=work_path, target=model_state, step=model_state.step)
 
 
 ###########################################################
@@ -128,24 +128,26 @@ if __name__ == "__main__":
 
     parser.add_argument('--random_state', type=int, default=42, help='random_state')
 
-    parser.add_argument('--epochs', type=int, default=100, help='number of epochs')
+    parser.add_argument('--epochs', type=int, default=1000, help='number of epochs')
     parser.add_argument('--batch_size', type=int, default=128, help='size of minibatch')
     parser.add_argument('--learning_rate', type=float, default=3e-3, help='size of steps to optimize')
-    parser.add_argument('--weigh_decay', type=float, default=0., help='google AdamW')
+    parser.add_argument('--weight_decay', type=float, default=0., help='google AdamW')
     parser.add_argument('--early_stopping', type=int, default=10, help='patient')
 
     parser.add_argument('--n_filters', type=int, default=32, help='number of filters in network')
-    parser.add_argument('--scale', type=int, default=10, help='upscale rate')
+    parser.add_argument('--scale', type=int, default=4, help='upscale rate')
     parser.add_argument('--n_blocks', type=int, default=12, help='number of blocks(naf, rfab)')
     parser.add_argument('--usegan', type=bool, default=False, help='whether to use gan discriminator')
     parser.add_argument('--sr_archs', type=str, default='sisr', help='select sr_archs to train')
-    parser.add_argument('--alpha', type=float, default=1., )
+    parser.add_argument('--alpha', type=float, default=1.)
+    parser.add_argument('--beta', type=float, default=1.)
     # NAFNet
-    parser.add_argument('--stochstic_depth_rate', type=float, default=.1, help='google Droppath/Stochastic_depth')
+    parser.add_argument('--stochastic_depth_rate', type=float, default=.1, help='google Droppath/Stochastic_depth')
     # RAMS
     parser.add_argument('--time', type=int, default=5, help='number of lags')
 
-    cfg_dict = vars(parser)
+    args = parser.parse_args()
+    cfg_dict = vars(args)
     cfg = ml_collections.config_dict.ConfigDict(cfg_dict)
 
     train_models(cfg)
