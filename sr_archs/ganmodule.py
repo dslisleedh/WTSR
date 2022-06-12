@@ -10,8 +10,10 @@ from typing import Optional, List
 class InstanceNorm2D(nn.Module):
 
     @nn.compact
-    def __call__(self, x, deterministic):
-        return nn.BatchNorm(axis=(1, 2))(x, use_running_average=deterministic)
+    def __call__(self, x):
+        shape = x.shape
+        x = nn.GroupNorm(num_groups=shape[-1])(x)
+        return x
 
 
 class DownsamplingConv2D(tf.keras.layers.Layer):
@@ -80,7 +82,7 @@ class FlaxCritic(nn.Module):
     n_filters: int = 32
 
     @nn.compact
-    def __call__(self, x, deterministic=True):
+    def __call__(self, x):
         x = nn.Conv(self.n_filters // 2,
                     kernel_size=(3, 3),
                     padding='VALID'
@@ -92,7 +94,7 @@ class FlaxCritic(nn.Module):
                         strides=(2, 2),
                         padding='SAME'
                         )(x)
-            x = InstanceNorm2D()(x, deterministic=deterministic)
+            x = InstanceNorm2D()(x)
             x = jax.nn.leaky_relu(x, negative_slope=.2)
         x = nn.Conv(1,
                     kernel_size=(3, 3),

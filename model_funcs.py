@@ -111,7 +111,7 @@ def update_critic(state, critic_state, lr, hr, rng, lambda_weights=10.):
     rng1, rng2 = jax.random.split(rng, 2)
 
     def loss_fn(critic_params):
-        recon = state.apply_fn({'params': state.params}, lr, deterministic=False,
+        recon = state.apply_fn({'params': state.params}, lr, deterministic=True,
                                rngs={'dropout': rng1, 'droppath': rng1})
         true_logit = critic_state.apply_fn({'params': critic_params}, hr)
         fake_logit = critic_state.apply_fn({'params': critic_params}, recon)
@@ -119,7 +119,9 @@ def update_critic(state, critic_state, lr, hr, rng, lambda_weights=10.):
         # compute gradient penalty
         epsilon = jax.random.uniform(rng2, shape=(hr.shape[0], 1, 1, 1), minval=0., maxval=1.)
         x_hat = epsilon * hr + (1. - epsilon) * recon
-        gp_grads = jax.vmap(jax.grad(lambda x: critic_state.apply_fn({'params': critic_params}, x)))(x_hat)
+        gp_grads = jax.vmap(
+            jax.grad(lambda x: critic_state.apply_fn({'params': critic_params}, x))
+        )(x_hat)
         gp_l2norm = jnp.sqrt(jnp.sum(jnp.square(gp_grads), axis=(1, 2, 3)))
         gp = jnp.mean(jnp.square(gp_l2norm - 1.))
 
