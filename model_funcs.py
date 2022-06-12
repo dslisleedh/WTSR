@@ -20,6 +20,14 @@ import matplotlib.pyplot as plt
 from utils import (
     downsample_bicubic, compute_metrics, get_patches
 )
+from flax import traverse_util
+from functools import partial
+
+
+def decay_mask_fn(params):
+    flat_params = traverse_util.flatten_dict(params)
+    flat_mask = {path: (path[-1] != "bias" and path[-2:] != ("LayerNorm", "scale")) for path in flat_params}
+    return traverse_util.unflatten_dict(flat_mask)
 
 
 def create_nafnet_train_state(rng, n_steps, config):
@@ -30,12 +38,14 @@ def create_nafnet_train_state(rng, n_steps, config):
         config.scale,
         config.n_filters,
         config.n_blocks,
-        config.stochastic_depth_rate
+        config.stochastic_depth_rate,
+        [1, config.patch_size, config.patch_size, 1]
     )
-    assert 48 % config.scale == 0
+    assert config.patch_size % config.scale == 0
     rng1, rng2 = jax.random.split(rng, 2)
     params = model.init({'params': rng1, 'droppath': rng2},
-                        jnp.ones([1, 48//config.scale, 48//config.scale, 1]))['params']
+                        jnp.ones([1, config.patch_size//config.scale, config.patch_size//config.scale, 1]))['params']
+    params = params.unfreeze()
     scheduler = optax.cosine_onecycle_schedule(
         10 * n_steps,
         config.learning_rate,
@@ -45,12 +55,14 @@ def create_nafnet_train_state(rng, n_steps, config):
         learning_rate=scheduler,
         weight_decay=config.weight_decay,
         b1=.9,
-        b2=.9
+        b2=.9,
+        mask=decay_mask_fn
     )
     if config.usegan:
         critic = ganmodule.FlaxCritic()
         critic_rng1, critic_rng2 = jax.random.split(critic_rng, 2)
-        critic_params = critic.init({'params': critic_rng1, 'droppath': critic_rng2}, jnp.ones([1, 48, 48, 1]))['params']
+        critic_params = critic.init({'params': critic_rng1, 'droppath': critic_rng2}, jnp.ones([1, config.patch_size, config.patch_size, 1]))['params']
+        critic_params = critic_params.unfreeze()
         critic_scheduler = optax.cosine_onecycle_schedule(
             50 * n_steps,
             config.learning_rate,
@@ -60,7 +72,8 @@ def create_nafnet_train_state(rng, n_steps, config):
             learning_rate=critic_scheduler,
             weight_decay=config.weight_decay,
             b1=.5,
-            b2=.9
+            b2=.9,
+            mask=decay_mask_fn
         )
         return (
             train_state.TrainState.create(
@@ -98,7 +111,8 @@ def update_critic(state, critic_state, lr, hr, rng, lambda_weights=10.):
     rng1, rng2 = jax.random.split(rng, 2)
 
     def loss_fn(critic_params):
-        recon = state.apply_fn({'params': state.params}, lr, deterministic=False, rngs={'dropout': rng1, 'droppath': rng1})
+        recon = state.apply_fn({'params': state.params}, lr, deterministic=False,
+                               rngs={'dropout': rng1, 'droppath': rng1})
         true_logit = critic_state.apply_fn({'params': critic_params}, hr)
         fake_logit = critic_state.apply_fn({'params': critic_params}, recon)
 
@@ -127,7 +141,7 @@ def update_critic(state, critic_state, lr, hr, rng, lambda_weights=10.):
 
 
 @jax.jit
-def apply_generator(state, critic_state, lr, hr, rng, alpha, beta):
+def update_generator(state, critic_state, lr, hr, rng, alpha, beta):
     def loss_fn(params, critic_params):
         recon = state.apply_fn({'params': params}, lr, deterministic=False, rngs={'dropout': rng, 'droppath': rng})
         fake_logit = critic_state.apply_fn({'params': critic_params}, recon)
@@ -148,21 +162,13 @@ def apply_generator(state, critic_state, lr, hr, rng, alpha, beta):
     return loss, new_gen_state
 
 
-def evaluate_model(state, lr, hr, max_val, rng):
-    recon = state.apply_fn({'params': state.params}, lr, rngs={'droppath': rng})
-    loss = jnp.mean(
-        jnp.abs(recon - hr)
-    )
-    psnr, ssim = compute_metrics(recon, hr, max_val)
-    return loss, psnr, ssim
-
-
 def nafnet_train_epochs(
         model_state,
         rng,
         train_ds,
         batch_size,
-        scale
+        scale,
+        patch_size
 ):
     s, h, w, c = train_ds.shape
     steps_per_epoch = s // batch_size
@@ -177,7 +183,7 @@ def nafnet_train_epochs(
     for perm in tqdm(perms):
         rng = jax.random.split(rng, 2)[0]
         batch_labels = train_ds[perm, ...]
-        batch_hr = get_patches(rng, batch_labels, 48)
+        batch_hr = get_patches(rng, batch_labels, patch_size)
         batch_lr = downsample_bicubic(batch_hr, scale)
 
         loss, model_state = update_model(
@@ -198,6 +204,7 @@ def nafnet_gan_train_epochs(
         rng,
         train_ds,
         batch_size,
+        patch_size,
         scale,
         alpha,
         beta,
@@ -216,10 +223,10 @@ def nafnet_gan_train_epochs(
     for perm in tqdm(perms):
         rng = jax.random.split(rng, 2)[0]
         batch_labels = train_ds[perm, ...]
-        batch_hr = get_patches(rng, batch_labels, 48)
+        batch_hr = get_patches(rng, batch_labels, patch_size)
         batch_lr = jax.image.resize(
             batch_hr,
-            (batch_size, 48 // scale, 48 // scale, c),
+            (batch_size, patch_size // scale, patch_size // scale, c),
             method='bicubic'
         )
 
@@ -232,7 +239,7 @@ def nafnet_gan_train_epochs(
                 rng
             )
             epoch_gan_loss.append(gan_loss)
-        gen_loss, model_state = apply_generator(
+        gen_loss, model_state = update_generator(
             model_state,
             critic_state,
             batch_lr,
@@ -246,3 +253,12 @@ def nafnet_gan_train_epochs(
     epoch_gan_loss = sum(epoch_gan_loss) / len(epoch_gan_loss)
     epoch_gen_loss = sum(epoch_gen_loss) / len(epoch_gen_loss)
     return model_state, critic_state, epoch_gan_loss, epoch_gen_loss
+
+
+def evaluate_model(state, lr, hr, max_val, rng):
+    recon = state.apply_fn({'params': state.params}, lr, rngs={'dropout': rng, 'droppath': rng})
+    loss = jnp.mean(
+        jnp.abs(recon - hr)
+    )
+    psnr, ssim = compute_metrics(recon, hr, max_val)
+    return loss, psnr, ssim, recon

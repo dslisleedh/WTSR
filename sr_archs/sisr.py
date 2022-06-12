@@ -19,6 +19,7 @@ class NAFBlock(nn.Module):
     n_filters: int
     kh: int
     kw: int
+    survival_prob: float
     dw_expansion_rate: int = 2
     ffn_expansion_rate: int = 2
 
@@ -38,12 +39,14 @@ class NAFBlock(nn.Module):
         spatial = nn.LayerNorm()(x)
         spatial = nn.Conv(dw_filters,
                           kernel_size=(1, 1),
-                          padding='VALID'
+                          padding='VALID',
+                          kernel_init=nn.initializers.variance_scaling(.02, 'fan_in', 'truncated_normal')
                           )(spatial)
         spatial = nn.Conv(dw_filters,
                           kernel_size=(3, 3),
                           padding='SAME',
-                          feature_group_count=dw_filters
+                          feature_group_count=dw_filters,
+                          kernel_init=nn.initializers.variance_scaling(.02, 'fan_in', 'truncated_normal')
                           )(spatial)
         # simple gate
         spatial_gate1, spatial_gate2 = jnp.split(spatial,
@@ -77,23 +80,32 @@ class NAFBlock(nn.Module):
                                          axis=(1, 2),
                                          keepdims=True
                                          )
-        spatial_attention = nn.Dense(self.n_filters)(spatial_statistic)
+        spatial_attention = nn.Dense(self.n_filters,
+                                     kernel_init=nn.initializers.variance_scaling(.02, 'fan_in', 'truncated_normal')
+                                     )(spatial_statistic)
         spatial = spatial * spatial_attention
         spatial = nn.Conv(self.n_filters,
                           kernel_size=(1, 1),
-                          padding='VALID'
+                          padding='VALID',
+                          kernel_init=nn.initializers.variance_scaling(.02, 'fan_in', 'truncated_normal')
                           )(spatial)
-        x = x + beta * spatial
+        spatial = beta * spatial
+        x = x + DropPath(self.survival_prob)(spatial, deterministic=deterministic)
 
         channel = nn.LayerNorm()(x)
-        channel = nn.Dense(ffn_filters)(channel)
+        channel = nn.Dense(ffn_filters,
+                           kernel_init=nn.initializers.variance_scaling(.02, 'fan_in', 'truncated_normal')
+                           )(channel)
         channel_gate1, channel_gate2 = jnp.split(channel,                                  # simple gate
                                                  indices_or_sections=2,
                                                  axis=-1
                                                  )
         channel = channel_gate1 * channel_gate2
-        channel = nn.Dense(self.n_filters)(channel)
-        x = x + gamma * channel
+        channel = nn.Dense(self.n_filters,
+                           kernel_init=nn.initializers.variance_scaling(.02, 'fan_in', 'truncated_normal')
+                           )(channel)
+        channel = gamma * channel
+        x = x + DropPath(self.survival_prob)(channel, deterministic=deterministic)
         return x
 
 
@@ -115,7 +127,7 @@ class DropPath(nn.Module):
                                        p=self.survival_prob,
                                        shape=broadcast_shape
                                        )
-        return inputs / self.survival_prob * epsilon
+        return jnp.where(epsilon, inputs / self.survival_prob, 0.)
 
 
 ### NAFSSR(https://arxiv.org/abs/2204.08714, https://github.com/megvii-research/NAFNet/blob/main/basicsr/models/archs/NAFSSR_arch.py)
@@ -124,7 +136,7 @@ class NAFNetSR(nn.Module):
     n_filters: int
     n_blocks: int
     stochastic_depth_rate: float
-    train_size = 1, 48, 48, 1
+    train_size: List[int]
     tlsc_rate: float = 1.5
 
     @nn.compact
@@ -136,16 +148,21 @@ class NAFNetSR(nn.Module):
         features = nn.Conv(self.n_filters,
                            (3, 3),
                            (1, 1),
-                           padding='SAME'
+                           padding='SAME',
+                           kernel_init=nn.initializers.variance_scaling(.02, 'fan_in', 'truncated_normal')
                            )(x)
         for _ in range(self.n_blocks):
-            features_res = NAFBlock(self.n_filters, kh, kw)(features)
-            features_res = DropPath(1. - self.stochastic_depth_rate)(features_res, deterministic=deterministic)
-            features = features + features_res
-        features = nn.Conv(self.upscale_rate ** 2,
-                           kernel_size=(3, 3)
+            features = NAFBlock(self.n_filters,
+                                kh, kw, 1 - self.stochastic_depth_rate)(features, deterministic=deterministic)
+        features = nn.Conv(3 * self.upscale_rate ** 2,
+                           kernel_size=(3, 3),
+                           kernel_init=nn.initializers.variance_scaling(.02, 'fan_in', 'truncated_normal')
                            )(features)
         recon = PixelShuffle(self.upscale_rate)(features)
+        recon = nn.Conv(1,
+                        kernel_size=(1, 1),
+                        kernel_init=nn.initializers.variance_scaling(.02, 'fan_in', 'truncated_normal')
+                        )(recon)
         recon_skip = jax.image.resize(x,
                                       (B, H * self.upscale_rate, W * self.upscale_rate, C),
                                       method='bilinear'

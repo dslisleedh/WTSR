@@ -1,5 +1,6 @@
 import tensorflow as tf
 import tensorflow_addons as tfa
+from sr_archs import ganmodule
 from typing import List
 
 
@@ -231,7 +232,7 @@ class RAMs(tf.keras.models.Model):
         )
 
         with tf.GradientTape() as tape:
-            recon = self.forward(patches_lr)
+            recon = self.forward(patches_lr, training=True)
             loss = tf.reduce_mean(
                 tf.abs(recon - patches_hr)
             )
@@ -243,14 +244,14 @@ class RAMs(tf.keras.models.Model):
         return {'recon_loss': loss}
 
     @tf.function
-    def forward(self, x):
+    def forward(self, x, training=False):
         skip = tf.expand_dims(tf.gather(x, -1, axis=-1), axis=-1)
         _, H, W, _ = tf.shape(skip)
-        features = self.to_features(tf.expand_dims(x, axis=-1))
-        features = features + self.rfabs(features)
-        features = self.trb(features)
-        global_residual = self.rtabs(x)
-        recon = self.recon(features + global_residual)
+        features = self.to_features(tf.expand_dims(x, axis=-1), training=training)
+        features = features + self.rfabs(features, training=training)
+        features = self.trb(features, training=training)
+        global_residual = self.rtabs(x, training=training)
+        recon = self.recon(features + global_residual, training=training)
         recon = recon + tf.image.resize(skip, (H*self.scale, W*self.scale), method='bilinear')
         return recon
 
@@ -259,8 +260,10 @@ class RAMs(tf.keras.models.Model):
 
 
 class RAMsGAN(RAMs):
-    def __init__(self, **kwargs):
+    def __init__(self, lambda_weights, **kwargs):
         super(RAMsGAN, self).__init__(**kwargs)
+        self.critic = ganmodule.TFCritic()
+        self.lambda_weights = lambda_weights
 
     def compile(self, learning_rate, ):
         super(RAMsGAN, self).compile()
@@ -283,9 +286,49 @@ class RAMsGAN(RAMs):
             method=tf.image.ResizeMethod.BICUBIC
         )
 
+        mean_criticism_loss = []
+        for _ in range(5):
+            with tf.GradientTape() as tape:
+                recon = self.forward(patches_lr)
+                epsilon = tf.random.uniform(shape=(tf.shape(recon)[0], 1, 1, 1))
+
+                with tf.GradientTape() as gp_tape:
+                    x_hat = epsilon * patches_hr + (1. - epsilon) * recon
+                    x_hat_disc = self.critic(x_hat, training=True)
+                gp_grads = gp_tape.gradient(x_hat_disc, x_hat)
+                gp_l2norm = tf.sqrt(tf.reduce_sum(tf.square(gp_grads), axis=[1, 2, 3]))
+                gp = tf.reduce_mean(tf.square(gp_l2norm - 1))
+                loss = tf.reduce_mean(
+                    self.critic(recon, training=True)
+                ) - tf.reduce_mean(
+                    self.critic(patches_hr, training=True)
+                ) + self.lambda_weights * gp
+            grads = tape.gradient(loss, self.critic.trainable_variables)
+            self.c_optimizer.apply_gradients(
+                zip(grads, self.critic.trainable_variables)
+            )
+            mean_criticism_loss.append(loss)
+        mean_criticism_loss = sum(mean_criticism_loss) / len(mean_criticism_loss)
+
         with tf.GradientTape() as tape:
-            recon = self.forward(patches_lr)
+            recon = self.forward(patches_lr, training=True)
+            loss = tf.reduce_mean(
+                tf.abs(recon - patches_hr)
+            ) * self.alpha - tf.reduce_mean(
+                self.critic(recon, training=False)
+            ) * self.beta
+        grads = tape.gradient(loss, self.to_features.trainable_variables +
+                              self.rfabs.trainable_variables + self.trb.trainable_variables +
+                              self.rtabs.trainable_vriables + self.recon.trainable_variables)
+        self.g_optizmier.apply_gradients(
+            zip(
+                grads,
+                self.to_features.trainable_variables +
+                self.rfabs.trainable_variables + self.trb.trainable_variables +
+                self.rtabs.trainable_vriables + self.recon.trainable_variables
+            )
+        )
 
-
+        return {'eman_criticism_loss': mean_criticism_loss, 'generation_loss': loss}
 
 
