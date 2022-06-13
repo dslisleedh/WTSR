@@ -91,10 +91,14 @@ def train_sisr(config):
 
         rng = jax.random.split(rng, 2)[0]
         loss, psnr, ssim, _ = evaluate_model(model_state, valid_lr, valid, 1., rng)
+
+        # To prevent early stopped too fast
+        if epoch == 1:
+            loss = 1.
+
         print(
             f'Epoch {epoch}, Valid loss : {loss}, Valid psnr: {psnr}, Valid ssim: {ssim}'
         )
-
         summary_writer.scalar('valid_loss', loss, epoch)
         summary_writer.scalar('valid_psnr', psnr, epoch)
         summary_writer.scalar('valid_ssim', ssim, epoch)
@@ -154,14 +158,14 @@ if __name__ == "__main__":
     parser.add_argument('--patch_size', type=int, default=50, help='train patch size')
 
     parser.add_argument('--epochs', type=int, default=1000, help='number of epochs')
-    parser.add_argument('--batch_size', type=int, default=128, help='size of minibatch')
+    parser.add_argument('--batch_size', type=int, default=512, help='size of minibatch')
     parser.add_argument('--learning_rate', type=float, default=5e-4, help='size of steps to optimize')
-    parser.add_argument('--weight_decay', type=float, default=0., help='google AdamW')
+    parser.add_argument('--weight_decay', type=float, default=1e-3, help='google AdamW')
     parser.add_argument('--early_stopping', type=int, default=10, help='patient')
 
     parser.add_argument('--n_filters', type=int, default=32, help='number of filters in network')
     parser.add_argument('--scale', type=int, default=10, help='upscale rate')
-    parser.add_argument('--n_blocks', type=int, default=28, help='number of blocks(naf, rfab)')
+    parser.add_argument('--n_blocks', type=int, default=12, help='number of blocks(naf, rfab)')
     parser.add_argument('--usegan', type=bool, default=False, help='whether to use gan discriminator')
     parser.add_argument('--sr_archs', type=str, default='sisr', help='select sr_archs to train')
     parser.add_argument('--alpha', type=float, default=1.)

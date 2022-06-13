@@ -5,7 +5,7 @@ import os
 import natsort
 
 
-def get_data_from_cdf(
+def _get_data_from_cdf(
         is_make_timeseries: bool = True,
         t: int = 5,
         val_rate: float = .2,
@@ -36,19 +36,19 @@ def get_data_from_cdf(
     np.save(save_path + 'test.npy', test)
 
     if is_make_timeseries:
-        train = make_timeseries(train, t)
-        valid = make_timeseries(valid, t)
-        test = make_timeseries(valid, t)
+        train = _make_timeseries(train, t)
+        valid = _make_timeseries(valid, t)
+        test = _make_timeseries(valid, t)
 
         np.save(save_path + 'ts_train.npy', train)
         np.save(save_path + 'ts_valid.npy', valid)
         np.save(save_path + 'ts_test.npy', test)
 
 
-def make_timeseries(inputs, t):
+def _make_timeseries(inputs, t):
     time_list = [inputs[i: -(t - i), :, :, :] for i in range(t)]
     return np.concatenate(time_list, axis=-1)
 
 
 if __name__ == "__main__":
-    get_data_from_cdf()
+    _get_data_from_cdf()
