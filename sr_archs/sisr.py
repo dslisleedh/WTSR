@@ -74,12 +74,12 @@ class NAFBlock(nn.Module):
                                             [[0, 0], h_pad, w_pad, [0, 0]],
                                             mode='edge'
                                             )
-        # simple attention
         else:
             spatial_statistic = jnp.mean(spatial,
                                          axis=(1, 2),
                                          keepdims=True
                                          )
+        # simple attention
         spatial_attention = nn.Dense(self.n_filters,
                                      kernel_init=nn.initializers.variance_scaling(.02, 'fan_in', 'truncated_normal')
                                      )(spatial_statistic)
@@ -123,11 +123,11 @@ class DropPath(nn.Module):
 
         rng = self.make_rng('droppath')
         broadcast_shape = [inputs[0].shape[0]] + [1 for _ in range(len(inputs[0].shape) - 1)]
-        epsilon = jax.random.bernoulli(key=rng,
-                                       p=self.survival_prob,
-                                       shape=broadcast_shape
-                                       )
-        return jnp.where(epsilon, inputs / self.survival_prob, 0.)
+        mask = jax.random.bernoulli(key=rng,
+                                    p=self.survival_prob,
+                                    shape=broadcast_shape
+                                    )
+        return jnp.where(mask, inputs / self.survival_prob, 0.)
 
 
 ### NAFSSR(https://arxiv.org/abs/2204.08714, https://github.com/megvii-research/NAFNet/blob/main/basicsr/models/archs/NAFSSR_arch.py)
@@ -145,27 +145,36 @@ class NAFNetSR(nn.Module):
 
         kh, kw = int(self.train_size[1] * self.tlsc_rate), int(self.train_size[2] * self.tlsc_rate)
 
+        # Intro
         features = nn.Conv(self.n_filters,
                            (3, 3),
                            (1, 1),
                            padding='SAME',
                            kernel_init=nn.initializers.variance_scaling(.02, 'fan_in', 'truncated_normal')
                            )(x)
+
+        # Middle
         for _ in range(self.n_blocks):
             features = NAFBlock(self.n_filters,
                                 kh, kw, 1 - self.stochastic_depth_rate)(features, deterministic=deterministic)
+
+        # End
         features = nn.Conv(3 * self.upscale_rate ** 2,
                            kernel_size=(3, 3),
                            kernel_init=nn.initializers.variance_scaling(.02, 'fan_in', 'truncated_normal')
                            )(features)
         recon = PixelShuffle(self.upscale_rate)(features)
+        recon = nn.Conv(3,
+                        kernel_size=(3, 3),
+                        kernel_init=nn.initializers.variance_scaling(.02, 'fan_in', 'truncated_normal')
+                        )(recon)
         recon = nn.Conv(1,
                         kernel_size=(1, 1),
                         kernel_init=nn.initializers.variance_scaling(.02, 'fan_in', 'truncated_normal')
                         )(recon)
         recon_skip = jax.image.resize(x,
                                       (B, H * self.upscale_rate, W * self.upscale_rate, C),
-                                      method='bilinear'
+                                      method='bicubic'
                                       )
         recon = recon + recon_skip
         return recon

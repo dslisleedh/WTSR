@@ -8,8 +8,8 @@ import natsort
 def _get_data_from_cdf(
         is_make_timeseries: bool = True,
         t: int = 5,
-        val_rate: float = .2,
-        test_rate: float = .2,
+        val_rate: float = .15,
+        test_rate: float = .15,
         data_path: str = './data/raw/',
         save_path: str = './data/preprocessed/'
 ):

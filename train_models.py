@@ -42,6 +42,8 @@ def train_sisr(config):
     os.mkdir(work_path)
     summary_writer = tensorboard.SummaryWriter(work_path)
     summary_writer.hparams(dict(config))
+    with open(work_path+'/hparams.txt', 'w') as file:
+        file.write(str(dict(config)))
 
     train, valid, test = load_datasets(config.sr_archs)
     whole_data = jnp.concatenate([train, valid, test], axis=0)
@@ -117,12 +119,30 @@ def train_sisr(config):
         bestmodel = model_state
     checkpoints.save_checkpoint(ckpt_dir=work_path, target=bestmodel, step=-1)
     rng = jax.random.split(rng, 2)[0]
-    psnr, ssim, loss, test_recon = evaluate_model(bestmodel, test_lr, test, max_val=1., rng=rng)
+    loss, psnr, ssim, test_recon = evaluate_model(bestmodel, test_lr, test, max_val=1., rng=rng)
+    test_rmse = jnp.mean(
+        jnp.sqrt(
+            jnp.square(
+                test_recon - test
+            )
+        )
+    )
     b, h, w, c = test.shape
     test_bicubic = jax.image.resize(
         test_lr,
         (b, h, w, c),
         method='bicubic'
+    )
+    bicubic_psnr, bicubic_ssim = compute_metrics(test_bicubic, test, max_val=1.)
+    bicubic_loss = jnp.mean(
+        jnp.abs(test_bicubic - test)
+    )
+    bicubic_rmse = jnp.mean(
+        jnp.sqrt(
+            jnp.square(
+                test_bicubic - test
+            )
+        )
     )
 
     test = inverse_normalize(test, data_min, data_max)
@@ -131,8 +151,24 @@ def train_sisr(config):
     test_bicubic = inverse_normalize(test_bicubic, data_min, data_max)
 
     summary_writer.scalar('test_loss', loss, 1)
-    summary_writer.scalar('test_loss', psnr, 1)
-    summary_writer.scalar('test_loss', ssim, 1)
+    summary_writer.scalar('test_psnr', psnr, 1)
+    summary_writer.scalar('test_ssim', ssim, 1)
+    summary_writer.scalar('test_rmse', test_rmse, 1)
+    summary_writer.scalar('bicubic_psnr', bicubic_psnr, 1)
+    summary_writer.scalar('bicubic_ssim', bicubic_ssim, 1)
+    summary_writer.scalar('bicubic_loss', bicubic_loss, 1)
+    summary_writer.scalar('bicubic_rmse', bicubic_rmse, 1)
+
+    with open(work_path+'/results.txt', 'w') as f:
+        f.write(f'test_loss: {loss} \n')
+        f.write(f'test_psnr: {psnr} \n')
+        f.write(f'test_ssim: {ssim} \n')
+        f.write(f'test_rmse: {test_rmse} \n')
+        f.write(f'bicubic_loss: {bicubic_loss} \n')
+        f.write(f'bicubic_psnr: {bicubic_psnr} \n')
+        f.write(f'bicubic_ssim: {bicubic_ssim} \n')
+        f.write(f'bicubic_rmse: {bicubic_rmse}')
+        f.close()
 
     fig, ax = plt.subplots(10, 4, figsize=(20, 40))
     plt.tight_layout()
@@ -158,20 +194,20 @@ if __name__ == "__main__":
     parser.add_argument('--patch_size', type=int, default=50, help='train patch size')
 
     parser.add_argument('--epochs', type=int, default=1000, help='number of epochs')
-    parser.add_argument('--batch_size', type=int, default=512, help='size of minibatch')
-    parser.add_argument('--learning_rate', type=float, default=5e-4, help='size of steps to optimize')
-    parser.add_argument('--weight_decay', type=float, default=1e-3, help='google AdamW')
+    parser.add_argument('--batch_size', type=int, default=32, help='size of minibatch')
+    parser.add_argument('--learning_rate', type=float, default=3e-3, help='size of steps to optimize')
+    parser.add_argument('--weight_decay', type=float, default=0., help='google AdamW')
     parser.add_argument('--early_stopping', type=int, default=10, help='patient')
 
-    parser.add_argument('--n_filters', type=int, default=32, help='number of filters in network')
+    parser.add_argument('--n_filters', type=int, default=16, help='number of filters in network')
     parser.add_argument('--scale', type=int, default=10, help='upscale rate')
-    parser.add_argument('--n_blocks', type=int, default=12, help='number of blocks(naf, rfab)')
+    parser.add_argument('--n_blocks', type=int, default=8, help='number of blocks(naf, rfab)')
     parser.add_argument('--usegan', type=bool, default=False, help='whether to use gan discriminator')
     parser.add_argument('--sr_archs', type=str, default='sisr', help='select sr_archs to train')
     parser.add_argument('--alpha', type=float, default=1.)
     parser.add_argument('--beta', type=float, default=1.)
     # NAFNet
-    parser.add_argument('--stochastic_depth_rate', type=float, default=.1, help='google Droppath/Stochastic_depth')
+    parser.add_argument('--stochastic_depth_rate', type=float, default=.2, help='google Droppath/Stochastic_depth')
     # RAMS
     parser.add_argument('--time', type=int, default=5, help='number of lags')
 
