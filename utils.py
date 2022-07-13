@@ -2,58 +2,109 @@ import tensorflow as tf
 import copy
 import tensorflow_addons as tfa
 import numpy as np
-import jax
-import jax.numpy as jnp
-import flax.linen as nn
-from flax.training import train_state
 from typing import Optional, List
-import optax
 import time
 import argparse
 from sr_archs import (
     ganmodule, sisr, misr
 )
-from jax import lax
 import os
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from functools import partial
 
 
-def load_datasets(model: str):
-    if model == 'sisr':
-        train = np.load('./data/preprocessed/train.npy')
-        valid = np.load('./data/preprocessed/valid.npy')
-        test = np.load('./data/preprocessed/test.npy')
-    elif model == 'misr':
-        train = np.load('./data/preprocessed/ts_train.npy')
-        valid = np.load('./data/preprocessed/ts_valid.npy')
-        test = np.load('./data/preprocessed/ts_test.npy')
+def load_datasets(dataset, t=None, run_hpo=False):
+    if run_hpo:
+        if dataset == 'lowtv':
+            train = np.load('../../data/preprocessed/lowtv/train.npy')
+            valid_1 = np.load('../../data/preprocessed/lowtv/valid_1.npy')
+            valid_2 = np.load('../../data/preprocessed/lowtv/valid_2.npy')
+            test_1 = np.load('../../data/preprocessed/lowtv/test_1.npy')
+            test_2 = np.load('../../data/preprocessed/lowtv/test_2.npy')
+        else:
+            train = np.load('../../data/preprocessed/hightv/train.npy')
+            valid_1 = np.load('../../data/preprocessed/hightv/valid_1.npy')
+            valid_2 = np.load('../../data/preprocessed/hightv/valid_2.npy')
+            test_1 = np.load('../../data/preprocessed/hightv/test_1.npy')
+            test_2 = np.load('../../data/preprocessed/hightv/test_2.npy')
     else:
-        raise NotImplementedError("Model selection error. ['sisr', 'misr']")
+        if dataset == 'lowtv':
+            train = np.load('./data/preprocessed/lowtv/train.npy')
+            valid_1 = np.load('./data/preprocessed/lowtv/valid_1.npy')
+            valid_2 = np.load('./data/preprocessed/lowtv/valid_2.npy')
+            test_1 = np.load('./data/preprocessed/lowtv/test_1.npy')
+            test_2 = np.load('./data/preprocessed/lowtv/test_2.npy')
+        else:
+            train = np.load('./data/preprocessed/hightv/train.npy')
+            valid_1 = np.load('./data/preprocessed/hightv/valid_1.npy')
+            valid_2 = np.load('./data/preprocessed/hightv/valid_2.npy')
+            test_1 = np.load('./data/preprocessed/hightv/test_1.npy')
+            test_2 = np.load('./data/preprocessed/hightv/test_2.npy')
+    if t is None:
+        valid = np.concatenate([
+            valid_1, valid_2
+        ], axis=0)
+        test = np.concatenate([
+            test_1, test_2
+        ], axis=0)
+    else:
+        train = make_timeseries(train, t)
+        valid = np.concatenate([
+            make_timeseries(valid_1, t), make_timeseries(valid_2, t)
+        ], axis=0)
+        test = np.concatenate([
+            make_timeseries(test_1, t), make_timeseries(test_2, t)
+        ], axis=0)
     return train, valid, test
 
 
-def get_patch(img, h_start, w_start, crop_size):
-    return lax.dynamic_slice(img, (h_start, w_start, 0), (crop_size, crop_size, 1))
-
-
-def get_patches(rng, img, crop_size):
-    b, h, w, c = img.shape
-    h_rng, w_rng = jax.random.split(rng, 2)
-    h_max, w_max = (
-        h - crop_size,
-        w - crop_size
+def preprocessing(hr, crop_size, scale):
+    hr = tf.image.random_crop(
+        tf.expand_dims(hr, 0), (1, crop_size, crop_size, 1)
     )
-    h_starts = jax.random.randint(h_rng, (b,), minval=0, maxval=h_max)
-    w_starts = jax.random.randint(w_rng, (b,), minval=0, maxval=w_max)
-    return jax.jit(jax.vmap(get_patch, in_axes=(0, 0, 0, None)), static_argnums=3)(img, h_starts, w_starts, crop_size)
+    lr = tf.image.resize(
+        hr, size=(crop_size//scale, crop_size//scale),
+        method=tf.image.ResizeMethod.BICUBIC
+    )[0, :, :, :]
+    return lr, hr[0, :, :, :]
+
+
+def eval_preprocessing(hr, scale):
+    h, w, c = hr.get_shape().as_list()
+    lr = tf.image.resize(
+        tf.expand_dims(hr, axis=0),
+        size=(h//scale, w//scale),
+        method=tf.image.ResizeMethod.BICUBIC
+    )[0, :, :, :]
+    return lr, hr
+
+
+def ts_preprocessing(hr, crop_size, scale):
+    h, w, t = hr.get_shape().as_list()
+
+    hr = tf.image.random_crop(hr, (crop_size, crop_size, t))
+
+    hr = tf.expand_dims(hr, 0)
+    lr = tf.image.resize(
+        hr, size=(crop_size//scale, crop_size//scale),
+        method=tf.image.ResizeMethod.BICUBIC
+    )[0, :, :, :]
+    label = hr[0, :, :, -1:]
+    return lr, label
+
+
+def ts_eval_preprocessing(hr, scale):
+    hr = tf.expand_dims(hr, 0)
+    lr = tf.image.resize(
+        hr, size=(100//scale, 100//scale),
+        method=tf.image.ResizeMethod.BICUBIC
+    )[0, :, :, :]
+    label = hr[0, :, :, -1:]
+    return lr, label
 
 
 def compute_metrics(recon, hr, max_val):
-    if isinstance(recon, jnp.ndarray):
-        recon = tf.convert_to_tensor(recon)
-        hr = tf.convert_to_tensor(hr)
     psnr = tf.reduce_mean(tf.image.psnr(recon, hr, max_val=max_val))
     ssim = tf.reduce_mean(tf.image.ssim(recon, hr, max_val=max_val))
     return psnr, ssim
@@ -81,13 +132,8 @@ def inverse_normalize(
     return x_inversed
 
 
-def downsample_bicubic(
-        x,
-        scale
+def make_timeseries(
+        data, t
 ):
-    b, h, w, c = x.shape
-    return jax.image.resize(
-        x,
-        (b, h//scale, w//scale, c),
-        method='bicubic'
-    )
+    time_list = [data[i: -(t - i), :, :, :] for i in range(t)]
+    return np.concatenate(time_list, axis=-1)
