@@ -117,6 +117,7 @@ class MultiHeadSelfAttention(tf.keras.layers.Layer):
         self.scale = tf.Variable(
             float(self.n_filters) ** -0.5,
             trainable=False,
+            dtype=tf.float32,
             name='scale'
         )
         self.dropout_rate = dropout_rate
@@ -142,11 +143,11 @@ class MultiHeadSelfAttention(tf.keras.layers.Layer):
         q, k, v = tf.unstack(
             einops.rearrange(
                 qkv, 'b n (qkv_expansion h c) -> b qkv_expansion h n c',
-                qkv_expansion=3, h=8
+                qkv_expansion=3, h=self.n_heads
             ),
             num=3,
             axis=1
-        ) # b h n c * 3
+        )
         attention_map = tf.matmul(q, k, transpose_b=True) * self.scale
         if tf.is_tensor(attention_mask):
             attention_map += (1. - attention_mask) * tf.DType(1.).min
@@ -176,6 +177,7 @@ class Transformer(tf.keras.layers.Layer):
         self.cls_token = tf.Variable(
             tf.random.truncated_normal(shape=(1, 1, self.n_filters), stddev=0.02),
             trainable=True,
+            dtype=tf.float32,
             name='cls_token'
         )
         self.attns = [
@@ -186,9 +188,9 @@ class Transformer(tf.keras.layers.Layer):
         ]
 
     def call(self, features, attention_mask=None, **kwargs):
-        cls_token = tf.ones_like(
+        cls_token = tf.zeros_like(
             tf.gather(features, [0], axis=1)
-        ) * self.cls_token
+        ) + self.cls_token
         features = tf.concat([cls_token, features], axis=1)
         for a, f in zip(self.attns, self.ffns):
             features = a(features, attention_mask)
@@ -242,6 +244,10 @@ class TRNet(tf.keras.models.Model):
         self.dropout_rate = dropout_rate
         self.upscale_rate = upscale_rate
 
+        # For LR decay
+        self.best_validation_psnr = tf.DType(1.).min
+        self.decay_patience = 0
+
         self.encoder = Encoder(
             self.n_filters, self.n_enc_layers
         )
@@ -260,8 +266,7 @@ class TRNet(tf.keras.models.Model):
     def train_step(self, data):
         inputs, hr = data
         if tf.is_tensor(inputs):
-            lr = inputs
-            attention_mask = None
+            lr, attention_mask = inputs, None
         else:
             lr, attention_mask = inputs
 
@@ -280,12 +285,47 @@ class TRNet(tf.keras.models.Model):
         self.compiled_metrics.update_state(hr, recon)
         return {m.name: m.result() for m in self.metrics}
 
+    def test_step(self, data):
+        inputs, hr = data
+        if tf.is_tensor(inputs):
+            lr, attention_mask = inputs, None
+        else:
+            lr, attention_mask = inputs
+
+        recon = self.forward(lr, attention_mask=attention_mask, training=False)
+        self.compiled_loss(hr, recon, regularization_losses=self.losses)
+
+        self.compiled_metrics.update_state(hr, recon)
+
+        val_psnr = [m.result() for m in self.metrics if m.name == 'psnr'][0]
+
+        def good_cond():
+            self.decay_patience = 0
+            self.best_validation_psnr = val_psnr
+
+        def bad_cond():
+            self.decay_patience += 1
+            if self.decay_patience > 3:
+                self.fu_optimizer.learning_rate = .95 * self.fu_optimizer.learning_rate
+                self.ed_optimizer.learning_rate = .95 * self.ed_optimizer.learning_rate
+                self.decay_patience = 0
+
+        tf.cond(
+            tf.math.less(self.best_validation_psnr, val_psnr),
+            good_cond,
+            bad_cond
+        )
+
+        return {m.name: m.result() for m in self.metrics}
+
     def forward(self, x, attention_mask=None, training=False):
         b, h, w, t = x.get_shape().as_list()
 
         if tf.is_tensor(attention_mask):
             attention_mask = tf.pad(attention_mask, ((0, 0), (1, 0)), constant_values=1.)[:, tf.newaxis, tf.newaxis, :]
-            attention_mask = einops.rearrange(tf.broadcast_to(attention_mask, (b, h, w, t+1)), 'b h w t_pad -> (b h w) t_pad')[:, tf.newaxis, tf.newaxis, :]
+            attention_mask = einops.rearrange(
+                tf.broadcast_to(attention_mask, (b, h, w, t+1)), 'b h w t_pad -> (b h w) t_pad'
+            )[:, tf.newaxis, tf.newaxis, :]
 
         # Encoder
         x = tf.expand_dims(x, axis=-1)
