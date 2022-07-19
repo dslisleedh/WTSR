@@ -24,8 +24,8 @@ def objective(trials):
         cfg_params = {
             'batch_size': trials.suggest_categorical('batch_size', [4, 8, 16, 32]),
             'learning_rate': trials.suggest_loguniform('learning_rate', 1e-6, 1e-2),
-            'n_filters': trials.suggest_categorical('n_filters', [8, 16, 32, 64, 128, 256]),
-            'n_blocks': trials.suggest_int('n_blocks', 4, 48),
+            'n_filters': trials.suggest_categorical('n_filters', [8, 16, 32, 64, 128]),
+            'n_blocks': trials.suggest_int('n_blocks', 4, 24),
             'drop_rate': trials.suggest_float('drop_rate', 0., .4, step=.05),
             'time': trials.suggest_int('time', 3, 9),
             'n_heads': trials.suggest_categorical('n_heads', [2, 4, 8]),

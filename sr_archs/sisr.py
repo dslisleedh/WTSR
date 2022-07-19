@@ -11,6 +11,7 @@ import math
 from typing import Sequence, Union
 
 
+# TLSC: Local statistic aggregating
 def edge_padding2d(x, h_pad, w_pad):
     if h_pad[0] != 0:
         x_up = tf.gather(x, indices=[0], axis=1)
@@ -31,6 +32,12 @@ def edge_padding2d(x, h_pad, w_pad):
     return x
 
 
+# Train때는 Patch로 학습하지만 Inference때는 전체 이미지사용. -> 추출하는 범위가 Train/Inference때 다르기에
+# Statistic의 차이가 있는 것을 줄이기 위해 나온 방법.
+
+# Train 시에는 Patch의 Statistic을 반환하고
+# Inference 시에는 Patch_size * TLSC_rate 크기의 Patch에서 추출한 Local statistic을 반환함. TLSC_rate는 hyperparameter지만,
+# NAFNet에서 사용한 것과 같이 1.5로 고정했음.
 class LocalAvgPool2D(tf.keras.layers.Layer):
     def __init__(self,
                  local_size: List[int]
@@ -158,6 +165,12 @@ class NAFBlock(tf.keras.layers.Layer):
                                    )
         ])
         self.drop1 = tf.keras.layers.Dropout(self.dropout_rate)
+        self.beta = tf.Variable(
+            tf.zeros((1, 1, 1, self.n_filters)),
+            trainable=True,
+            dtype=tf.float32,
+            name='beta'
+        )
 
         self.channel = tf.keras.Sequential([
             tf.keras.layers.LayerNormalization(),
@@ -172,13 +185,6 @@ class NAFBlock(tf.keras.layers.Layer):
                                   )
         ])
         self.drop2 = tf.keras.layers.Dropout(self.dropout_rate)
-
-        self.beta = tf.Variable(
-            tf.zeros((1, 1, 1, self.n_filters)),
-            trainable=True,
-            dtype=tf.float32,
-            name='beta'
-        )
         self.gamma = tf.Variable(
             tf.zeros((1, 1, 1, self.n_filters)),
             trainable=True,
@@ -192,6 +198,14 @@ class NAFBlock(tf.keras.layers.Layer):
         return inputs
 
 
+# 각 Element를 확률적으로 Drop하는 Dropout과 다르게 각 Block을 확률적으로 Drop함.
+# Droppath를 구현한 방법엔 여러가지가 있지만, NAFNet에서 구현한 방법을 따라서 구현.
+
+# Train 시 0. ~ 1. 에서 uniform sample된 value가 survival prob보다 낮으면 state = True 아니면 state = False
+# True면 Input + (self.forward(inputs) - inputs / self.survival_prob) 을 반환.
+# False면 그냥 input만 반환(forward를 거치지 않음)
+
+# Test 시에는 그냥 self.forward(inputs) 반환.
 class DropPath(tf.keras.layers.Layer):
     def __init__(self,
                  survival_prob: float,

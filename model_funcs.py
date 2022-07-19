@@ -184,24 +184,39 @@ def train_models(config, run_hpo=False):
         raise ValueError("Model selection error. ['sisr', 'misr', 'sisr_swin']")
 
     # Callback정의. PSNR이 더이상 감소하지 않으면 학습 중단 및 텐서보드에 학습 기록.
-    model_callbacks = [
-        tf.keras.callbacks.EarlyStopping(monitor='val_psnr',
-                                         patience=config.early_stopping, restore_best_weights=True,
-                                         mode='max'
-                                         ),
-        tf.keras.callbacks.TensorBoard(log_dir=config.work_path)
-    ]
+    if config.sr_archs == 'misr':
+        model_callbacks = [
+            TRMISR_callback(),
+            tf.keras.callbacks.EarlyStopping(monitor='val_psnr',
+                                             patience=config.early_stopping, restore_best_weights=True,
+                                             mode='max'
+                                             ),
+            tf.keras.callbacks.TensorBoard(log_dir=config.work_path)
+        ]
+    else:
+        model_callbacks = [
+            tf.keras.callbacks.EarlyStopping(monitor='val_psnr',
+                                             patience=config.early_stopping, restore_best_weights=True,
+                                             mode='max'
+                                             ),
+            tf.keras.callbacks.TensorBoard(log_dir=config.work_path)
+        ]
     # 모델 학습.
     model.fit(
         train_ds, validation_data=valid_ds, epochs=config.epochs, callbacks=model_callbacks
     )
+    # Fine tuning
     if config.sr_archs == 'misr':
-        model.fu_optimizer.learning_rate = config.learning_rate / 40
-        model.ed_optimizer.learning_rate = config.learning_rate / 20
+        model_callbacks = [
+            tf.keras.callbacks.TensorBoard(log_dir=config.work_path)
+        ]
+        model.fu_optimizer.lr = config.learning_rate / 40
+        model.ed_optimizer.lr = config.learning_rate / 20
         model.fit(
             train_ds, validation_data=valid_ds, epochs=20, callbacks=model_callbacks
         )
-    #학습이 끝난 모델의 weights 저장.
+
+    # 학습이 끝난 모델의 weights 저장.
     model.save_weights(config.work_path+'/bestmodel_ckpt')
 
     ############################# Block 4 #############################

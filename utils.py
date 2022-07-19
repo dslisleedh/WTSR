@@ -158,3 +158,40 @@ def make_timeseries(
 ):
     time_list = [data[i: -(t - i), :, :, :] for i in range(t)]
     return np.concatenate(time_list, axis=-1)
+
+
+# TR-MISR 논문에서 Validation metric이 3회동안 증가하지 않으면 LR을 .05% drop함.
+class TRMISR_callback(tf.keras.callbacks.Callback):
+    def __init__(self):
+        self.patience = 0
+        self.best = tf.DType(1.).min
+
+    def on_train_begin(self, logs=None):
+        self.patience = 0
+        self.best = tf.DType(1.).min
+
+    def on_epoch_end(self, epoch, logs=None):
+        current = logs.get('val_psnr')
+
+        def _good_cond():
+            self.patience = 0
+            self.best = current
+
+        def _bad_cond():
+            self.patience += 1
+            if self.patience >= 3:
+                self.patience = 0
+                ed_lr = float(tf.keras.backend.get_value(self.model.ed_optimizer.lr))
+                new_ed_lr = ed_lr * .95
+                tf.keras.backend.set_value(self.model.ed_optimizer.lr, new_ed_lr)
+                fu_lr = float(tf.keras.backend.get_value(self.model.fu_optimizer.lr))
+                new_fu_lr = fu_lr * .95
+                tf.keras.backend.set_value(self.model.fu_optimizer.lr, new_fu_lr)
+
+                print('\nLR dropped by .05')
+
+        tf.cond(
+            tf.math.less(self.best, current),
+            _good_cond,
+            _bad_cond
+        )

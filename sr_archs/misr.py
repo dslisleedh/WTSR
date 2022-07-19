@@ -4,6 +4,10 @@ from sr_archs.model_utils import PixelShuffle
 import einops
 
 
+# cMSE/cPNSR 및 bad pixel mask는 구현하지 않았음.
+# cMSE/cPSNR: 위성사진의 mis-alignment으로 인한 loss를 줄이기 위함인데 수온 데이터는 그런 위험이 적고 mis-alignment가 있더라도 수온의
+#             변동량이 더 클 것이라 생각했음. 또한 cMSE를 구하는데 필요한 clearity? 이미지의 품질을 나타내는 항목도 없어서 사용불가함.
+# bad pixel mask: 원본 데이터는 구름에 가려진 부분 같은 데를 마스크 처리해서 로스에 포함시키지 않지만 여기는 그럴 걱정 X
 class ResidualBlock(tf.keras.layers.Layer):
     def __init__(self,
                  n_filters: int,
@@ -188,6 +192,7 @@ class Transformer(tf.keras.layers.Layer):
         ]
 
     def call(self, features, attention_mask=None, **kwargs):
+        # add cls token not multiply to prevent gradient exploding/vanishing
         cls_token = tf.zeros_like(
             tf.gather(features, [0], axis=1)
         ) + self.cls_token
@@ -244,10 +249,6 @@ class TRNet(tf.keras.models.Model):
         self.dropout_rate = dropout_rate
         self.upscale_rate = upscale_rate
 
-        # For LR decay
-        self.best_validation_psnr = tf.DType(1.).min
-        self.decay_patience = 0
-
         self.encoder = Encoder(
             self.n_filters, self.n_enc_layers
         )
@@ -296,26 +297,6 @@ class TRNet(tf.keras.models.Model):
         self.compiled_loss(hr, recon, regularization_losses=self.losses)
 
         self.compiled_metrics.update_state(hr, recon)
-
-        val_psnr = [m.result() for m in self.metrics if m.name == 'psnr'][0]
-
-        def good_cond():
-            self.decay_patience = 0
-            self.best_validation_psnr = val_psnr
-
-        def bad_cond():
-            self.decay_patience += 1
-            if self.decay_patience > 3:
-                self.fu_optimizer.learning_rate = .95 * self.fu_optimizer.learning_rate
-                self.ed_optimizer.learning_rate = .95 * self.ed_optimizer.learning_rate
-                self.decay_patience = 0
-
-        tf.cond(
-            tf.math.less(self.best_validation_psnr, val_psnr),
-            good_cond,
-            bad_cond
-        )
-
         return {m.name: m.result() for m in self.metrics}
 
     def forward(self, x, attention_mask=None, training=False):
@@ -351,8 +332,7 @@ class TRNet(tf.keras.models.Model):
 
     def call(self, inputs, training=None, mask=None):
         if tf.is_tensor(inputs):
-            lrs = inputs
-            attention_mask = None
+            lrs, attention_mask = inputs, None
         else:
             lrs, attention_mask = inputs
         if training is None:
