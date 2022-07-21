@@ -3,7 +3,7 @@ import tensorflow as tf
 import ml_collections
 from utils import *
 from sr_archs import (
-    ganmodule, sisr, misr
+    sisr, misr
 )
 import matplotlib.pyplot as plt
 import time
@@ -69,18 +69,18 @@ def train_models(config, run_hpo=False):
     data_min, data_max = tf.reduce_min(whole_data), tf.reduce_max(whole_data)
     del whole_data
     train = normalize(train, data_min, data_max)[0]
-
+    valid = normalize(valid, data_min, data_max)[0]
+    test = normalize(test, data_min, data_max)[0]
+    
     # 사용할 모델에 따라 dataset 생성.
     if config.sr_archs == 'misr':
         train_ds = tf.data.Dataset.from_tensor_slices(train).shuffle(buffer_size=len(train)) \
             .map(lambda x: ts_preprocessing(x, config.patch_size, config.scale)) \
             .batch(batch_size=config.batch_size, drop_remainder=True) \
             .prefetch(tf.data.experimental.AUTOTUNE)
-        valid = normalize(valid, data_min, data_max)[0]
         valid_ds = tf.data.Dataset.from_tensor_slices(valid).map(lambda x: ts_eval_preprocessing(x, config.scale)) \
             .batch(batch_size=16, drop_remainder=False) \
             .prefetch(tf.data.experimental.AUTOTUNE)
-        test = normalize(test, data_min, data_max)[0]
         test_ds = tf.data.Dataset.from_tensor_slices(test).map(lambda x: ts_eval_preprocessing(x, config.scale)) \
             .batch(batch_size=16, drop_remainder=False) \
             .prefetch(tf.data.experimental.AUTOTUNE)
@@ -89,11 +89,9 @@ def train_models(config, run_hpo=False):
             .map(lambda x: preprocessing(x, config.patch_size, config.scale)) \
             .batch(batch_size=config.batch_size, drop_remainder=True) \
             .prefetch(tf.data.experimental.AUTOTUNE)
-        valid = normalize(valid, data_min, data_max)[0]
         valid_ds = tf.data.Dataset.from_tensor_slices(valid).map(lambda x: eval_preprocessing(x, config.scale)) \
             .batch(batch_size=128, drop_remainder=False) \
             .prefetch(tf.data.experimental.AUTOTUNE)
-        test = normalize(test, data_min, data_max)[0]
         test_ds = tf.data.Dataset.from_tensor_slices(test).map(lambda x: eval_preprocessing(x, config.scale)) \
             .batch(batch_size=128, drop_remainder=False) \
             .prefetch(tf.data.experimental.AUTOTUNE)
@@ -108,7 +106,7 @@ def train_models(config, run_hpo=False):
 
     # Config에 맞는 모델 반환.
     # SISR은 NAFSSR의 세팅을 최대한 따랐으며(SwinIR에서 Optimizer setting을 못찾았음)
-    # MISR은 Decay부분 구현이 힘들어서 이부분 빼고 따라함.
+    # MISR은 논문에서 Validation Metric(R_bar)가 3회 증가하지 않으면 Decay 하는 방식을 따라 채용함.
     if config.sr_archs == 'sisr':
         model = sisr.NAFNetSR(
             config.scale, config.n_filters, config.n_blocks, config.drop_rate,

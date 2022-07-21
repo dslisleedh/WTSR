@@ -6,7 +6,7 @@ from typing import Optional, List
 import time
 import argparse
 from sr_archs import (
-    ganmodule, sisr, misr
+    sisr, misr
 )
 import os
 from tqdm import tqdm
@@ -135,8 +135,8 @@ def normalize(
         x_max=None
 ):
     if x_min is None:
-        x_min = x.min(axis=0)
-        x_max = x.max(axis=0)
+        x_min = x.min()
+        x_max = x.max()
 
     x_scaled = (x - x_min) / (x_max - x_min)
     return x_scaled, x_min, x_max

@@ -16,7 +16,7 @@ import ml_collections
 import model_funcs
 import utils
 from sr_archs import (
-    ganmodule, sisr, misr
+    sisr, misr
 )
 from utils import *
 from model_funcs import *
