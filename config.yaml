@@ -1,0 +1,33 @@
+random_state: 42
+dataset: hightv  # 'hightv' or 'lowtv'
+image_size: 96  # 96 or 100
+patch_size: 48  # 48 or 50
+
+epochs: 1000
+batch_size: 128
+learning_rate: 3e-4
+early_stopping: 50
+use_frloss: True # bool
+
+n_filters: 16
+scale: 4  # [2, 3, 4, 6, 8, 10]
+n_blocks: 8
+sr_archs: sisr  # sisr or misr
+drop_rate: .2
+
+# NAFNet, TestModel
+weight_decay: 0. # Recommend to fix 0.
+
+# TR-MISR
+time: 5
+n_heads: 8
+n_enc_blocks: 2
+
+# GAN
+use_gan: False
+discriminator_filters: 8
+discriminator_type: sngan  # sngan or ragan
+gan_loss_weight: 1e-3
+
+# Optuna
+n_trials: 100

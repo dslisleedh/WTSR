@@ -12,6 +12,7 @@ import os
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from functools import partial
+import pywt
 
 
 def load_datasets(dataset, size, t=None, run_hpo=False):
@@ -20,17 +21,17 @@ def load_datasets(dataset, size, t=None, run_hpo=False):
     # 덜 복잡한 이미지(Low Total Variance)를 데이터셋으로 사용하는 경우.
     if run_hpo:
         if dataset == 'lowtv':
-            train = np.load('../../data/preprocessed/lowtv/train.npy')
-            valid_1 = np.load('../../data/preprocessed/lowtv/valid_1.npy')
-            valid_2 = np.load('../../data/preprocessed/lowtv/valid_2.npy')
-            test_1 = np.load('../../data/preprocessed/lowtv/test_1.npy')
-            test_2 = np.load('../../data/preprocessed/lowtv/test_2.npy')
+            train = np.load('../../../../data/preprocessed/lowtv/train.npy')
+            valid_1 = np.load('../../../../data/preprocessed/lowtv/valid_1.npy')
+            valid_2 = np.load('../../../../data/preprocessed/lowtv/valid_2.npy')
+            test_1 = np.load('../../../../data/preprocessed/lowtv/test_1.npy')
+            test_2 = np.load('../../../../data/preprocessed/lowtv/test_2.npy')
         else:
-            train = np.load('../../data/preprocessed/hightv/train.npy')
-            valid_1 = np.load('../../data/preprocessed/hightv/valid_1.npy')
-            valid_2 = np.load('../../data/preprocessed/hightv/valid_2.npy')
-            test_1 = np.load('../../data/preprocessed/hightv/test_1.npy')
-            test_2 = np.load('../../data/preprocessed/hightv/test_2.npy')
+            train = np.load('../../../../data/preprocessed/hightv/train.npy')
+            valid_1 = np.load('../../../../data/preprocessed/hightv/valid_1.npy')
+            valid_2 = np.load('../../../../data/preprocessed/hightv/valid_2.npy')
+            test_1 = np.load('../../../../data/preprocessed/hightv/test_1.npy')
+            test_2 = np.load('../../../../data/preprocessed/hightv/test_2.npy')
     else:
         if dataset == 'lowtv':
             train = np.load('./data/preprocessed/lowtv/train.npy')
@@ -108,7 +109,7 @@ def ts_preprocessing(hr, crop_size, scale):
 
 
 # TF Dataset에서 Mapping을 위해 쓰이는 함수.
-# MISR Val/Test 시 Augmentation 및 주어진 데이터에서 X와 y를 생성함.
+# MISR Val/Test 시 주어진 데이터에서 X와 y를 생성함.
 def ts_eval_preprocessing(hr, scale):
     h, w, c = hr.get_shape().as_list()
     hr = tf.expand_dims(hr, 0)
@@ -195,3 +196,27 @@ class TRMISR_callback(tf.keras.callbacks.Callback):
             _good_cond,
             _bad_cond
         )
+
+
+def return_interpolate_weights(
+        psnr_weights, gan_weights, alpha: float = .2
+):
+    weights = []
+    for psnr_weight, gan_weight in zip(psnr_weights, gan_weights):
+        weights.append((1 - alpha) * psnr_weight + alpha * gan_weight)
+
+    return weights
+
+
+def calcuate_wt_rmse(hr, sr):
+    # Get high frequency component
+    _, (_, _, hr_hh) = pywt.dwt2(hr, 'haar', axes=(1, 2))
+    _, (_, _, sr_hh) = pywt.dwt2(sr, 'haar', axes=(1, 2))
+
+    # Calculate ergas on high frequency component
+    rmse = np.sqrt(
+        np.mean(
+            np.square(hr_hh - sr_hh)
+        )
+    )
+    return rmse

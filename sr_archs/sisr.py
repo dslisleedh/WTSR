@@ -1,6 +1,6 @@
 import tensorflow as tf
 import tensorflow.keras.backend as K
-from sr_archs.model_utils import PixelShuffle
+from sr_archs.model_utils import *
 from typing import List
 import tensorflow_addons as tfa
 import einops
@@ -45,10 +45,9 @@ class LocalAvgPool2D(tf.keras.layers.Layer):
         super(LocalAvgPool2D, self).__init__()
         self.local_size = local_size
 
-    def call(self, inputs, *args, **kwargs):
-        if K.learning_phase():
-            return tf.reduce_mean(inputs, axis=[1, 2], keepdims=True)
-
+    def call(self, inputs, training):
+        if training:
+            return tf.reduce_mean(inputs, axis=[1,2], keepdims=True)
         _, h, w, _ = inputs.get_shape().as_list()
         kh = min(h, self.local_size[0])
         kw = min(w, self.local_size[1])
@@ -215,7 +214,7 @@ class DropPath(tf.keras.layers.Layer):
         self.survival_prob = survival_prob
         self.forward = module
 
-    def call(self, inputs, *args, **kwargs):
+    def call(self, inputs, training):
 
         def _call_train():
             return tf.cond(
@@ -229,7 +228,8 @@ class DropPath(tf.keras.layers.Layer):
 
         return K.in_train_phase(
             _call_train(),
-            _call_test()
+            _call_test(),
+            training=training
         )
 
 
@@ -291,14 +291,102 @@ class NAFNetSR(tf.keras.models.Model):
         )
         features = self.intro(x, training=training)
         features = self.middles(features, training=training)
-        recon = self.upscale(features, training=training)
-        recon += x_skip
+        recon = self.upscale(features, training=training) + x_skip
         return recon
 
     def call(self, inputs, training=None, mask=None):
         if training is None:
             training = False
         return self.forward(inputs, training=training)
+    
+    
+class NAFNetSRGAN(NAFNetSR):
+    def __init__(self, **kwargs):
+        self.discriminator_filters = kwargs.pop('discriminator_filters', 32)
+        self.gan_loss_weight = kwargs.pop('gan_loss_weight', 1e-3)
+        self.discriminator_type = kwargs.pop('discriminator_type', 'sngan')
+        super(NAFNetSRGAN, self).__init__(**kwargs)
+        self.discriminator = Discriminator(
+            self.discriminator_filters,
+            kwargs['upscale_rate']
+        )
+        self.pt_model = tf.keras.applications.inception_v3.InceptionV3(
+            include_top=False, weights='imagenet', input_shape=(96, 96, 3), pooling='avg'
+        )
+        self.disc_loss = hinge_disc_loss if discriminator_type == 'sngan' else relative_disc_loss
+        self.gen_loss = hinge_gen_loss if discriminator_type == 'sngan' else relative_gen_loss
+
+    def compile(self, **kwargs):
+        self.d_optimizer = kwargs.pop('d_optimizer', tf.keras.optimizers.Adam(learning_rate=2e-4))
+        super(NAFNetSRGAN, self).compile(**kwargs)
+        
+    def train_step(self, data):
+        lr, hr = data
+
+        with tf.GradientTape(persistent=True) as tape:
+            sr = self.forward(lr, training=True)
+            sr_loss = tf.reduce_mean(
+                tf.abs(sr - hr)
+            )
+
+            sr = sr[:, slice(0, 48), slice(0, 48), :]
+            sr = tf.concat([sr for _ in range(3)], axis=-1)
+            hr = hr[:, slice(0, 48), slice(0, 48), :]
+            hr = tf.concat([hr for _ in range(3)], axis=-1)
+            disc_hr = self.discriminator(hr, training=True)
+            disc_sr = self.discriminator(sr, training=True)
+            disc_true_loss, disc_fake_loss = self.disc_loss(
+                disc_hr, disc_sr, 1.
+            )
+            gen_loss = self.gen_loss(
+                disc_hr, disc_sr, self.gan_loss_weight
+            )
+            sr_model_loss = sr_loss + gen_loss
+            discriminator_loss = (disc_true_loss + disc_fake_loss) * .5
+
+        sr_model_grads = tape.gradient(
+            sr_model_loss,
+            self.intro.trainable_variables + self.middles.trainable_variables + self.upscale.trainable_variables
+        )
+        discriminator_grads = tape.gradient(
+            discriminator_loss, self.discriminator.trainable_variables
+        )
+        self.optimizer.apply_gradients(
+            zip(
+                sr_model_grads,
+                self.intro.trainable_variables + self.middles.trainable_variables + self.upscale.trainable_variables
+            )
+        )
+        self.d_optimizer.apply_gradients(
+            zip(discriminator_grads, self.discriminator.trainable_variables)
+        )
+
+        return {
+            'reconstruction_loss': sr_loss,
+            'discrimination_true_loss': disc_true_loss,
+            'discrimination_fake_loss': disc_fake_loss,
+            'generator_loss': gen_loss
+        }
+
+    def test_step(self, data):
+        lr, hr = data
+        sr = self.forward(lr, training=False)
+        reconstruction_loss = tf.reduce_mean(tf.abs(sr - hr))
+        sr = sr[:, slice(0, 96), slice(0, 96), :]
+        sr = tf.concat([sr for _ in range(3)], axis=-1)
+        hr = hr[:, slice(0, 96), slice(0, 96), :]
+        hr = tf.concat([hr for _ in range(3)], axis=-1)
+        sr_feature_map = self.pt_model(sr)
+        hr_feature_map = self.pt_model(hr)
+        fid = fid_score(hr_feature_map, sr_feature_map)
+        psnr = tf.reduce_mean(tf.image.psnr(sr, hr, max_val=1.))
+        ssim = tf.reduce_mean(tf.image.ssim(sr, hr, max_val=1.))
+        return {
+            'reconstruction_loss': reconstruction_loss,
+            'psnr': psnr,
+            'ssim': ssim,
+            'fid': fid
+        }
 
 
 #################################################### SwinIR ####################################################
